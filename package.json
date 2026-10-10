@@ -1,0 +1,23 @@
+{
+  "name": "shipyard",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.9.1",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @shipyard/web dev",
+    "build": "pnpm --filter @shipyard/web build",
+    "start": "pnpm --filter @shipyard/web start",
+    "lint": "pnpm --filter @shipyard/web lint",
+    "typecheck": "pnpm --filter @shipyard/web typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck"
+  },
+  "devDependencies": {
+    "prettier": "3.9.9",
+    "prettier-plugin-tailwindcss": "0.8.1"
+  }
+}

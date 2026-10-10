@@ -3,3 +3,10 @@
 .env.*
 !.env.example
 /apps/api/server
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/

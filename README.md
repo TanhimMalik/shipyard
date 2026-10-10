@@ -1,63 +1,46 @@
 # Shipyard
 
-Shipyard is a deployment platform in development. The current foundation is a
-local Go HTTP service with a health endpoint. Application deployment, persistence,
-routing, recovery, and the web interface are not implemented yet.
+Shipyard is a single-host deployment platform in development. So far it has a Go
+health API and a Next.js shell with dark and light themes. The interface is not
+connected to the API yet. Projects and application deployment come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
-engine on one Linux Docker host. The current service runs locally only.
+engine on one Linux Docker host. Everything currently runs locally.
 
-## Run the API
+## Run locally
 
-Requires Go 1.27.2 or newer in the Go 1.27 release series.
+Use Node 24, pnpm 12.9.1, and Go 1.27.2 or newer in the Go 1.27 release series.
+From the repository root:
+
+```sh
+pnpm install
+pnpm dev
+```
+
+Open http://127.0.0.1:3000. To run the API in another terminal:
 
 ```sh
 cd apps/api
 go run ./cmd/server
 ```
 
-In another terminal:
+`GET http://127.0.0.1:8080/api/health` returns `200 OK` and `{"status":"ok"}`.
+This checks process liveness only. `HEAD` is also supported; other methods return
+`405` and unknown paths return `404`.
 
-```sh
-curl --fail --silent --show-error http://127.0.0.1:8080/api/health
-```
+Set `SHIPYARD_API_ADDR` to change the API address, for example `127.0.0.1:9090` or
+`[::1]:8080`. Only literal loopback addresses and ports from 1 to 65535 are accepted.
+Ctrl+C or SIGTERM allows active requests up to five seconds to finish before the
+API closes remaining connections. Startup and shutdown failures exit nonzero.
 
-The response is `200 OK` with `Content-Type: application/json` and:
+Geist and JetBrains Mono load through `next/font`; builds need access to Google
+Fonts. The theme defaults to dark and remembers changes in the browser.
 
-```json
-{"status":"ok"}
-```
+## Checks
 
-This reports process liveness only. It does not check external dependencies.
-`HEAD /api/health` is also supported; other methods return `405` and unknown paths
-return `404`.
+Run `pnpm check` for formatting, lint, and TypeScript checks, then `pnpm build` for
+the production frontend build. Run `pnpm format` to apply formatting.
 
-The optional `SHIPYARD_API_ADDR` environment variable defaults to
-`127.0.0.1:8080`. It accepts a literal loopback IP and a port from 1 to 65535:
-
-```sh
-SHIPYARD_API_ADDR=127.0.0.1:9090 go run ./cmd/server
-```
-
-IPv6 loopback (`[::1]:8080`) is supported. Empty values, hostnames, wildcard
-addresses, non-loopback addresses, and invalid ports are rejected before binding.
-
-Press Ctrl+C or send SIGTERM to stop. The API allows active requests up to five
-seconds to complete before closing remaining connections. Startup errors and
-shutdown failures produce a nonzero exit status.
-
-## Verify
-
-From `apps/api`:
-
-```sh
-gofmt -l .
-go vet ./...
-go test ./...
-go test -race ./...
-go build ./...
-```
-
-`gofmt -l .` should print nothing. Tests cover address validation, the health
-contract and routing, active-request draining, and listener failures. The API uses
-only the Go standard library.
+From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,
+`go test -race ./...`, and `go build ./...`. The API uses only the Go standard
+library. Its tests cover configuration, health responses, routing, and shutdown.

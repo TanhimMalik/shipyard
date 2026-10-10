@@ -1,0 +1,7 @@
+packages:
+  - apps/web
+allowBuilds:
+  unrs-resolver@1.12.2: true
+minimumReleaseAgeExclude:
+  - "@types/node@24.19.2"
+  - lucide-react@1.55.0

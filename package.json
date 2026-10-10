@@ -12,6 +12,7 @@
     "start": "pnpm --filter @shipyard/web start",
     "lint": "pnpm --filter @shipyard/web lint",
     "typecheck": "pnpm --filter @shipyard/web typecheck",
+    "test": "pnpm --filter @shipyard/web test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck"

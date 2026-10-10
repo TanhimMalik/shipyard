@@ -20,6 +20,8 @@
   --color-primary-hover: var(--primary-hover);
   --color-primary-foreground: var(--primary-foreground);
   --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-danger: var(--danger);
   --font-sans: var(--font-geist), Arial, sans-serif;
   --font-mono: var(--font-jetbrains-mono), monospace;
   --radius-lg: var(--radius);

@@ -1,9 +1,13 @@
 import { FolderOpen } from "lucide-react";
+import { ApiHealth } from "../components/api-health";
 
 export default function OverviewPage() {
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
+        <ApiHealth />
+      </div>
 
       <section
         aria-labelledby="welcome-heading"

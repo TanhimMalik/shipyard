@@ -1,8 +1,8 @@
 # Shipyard
 
 Shipyard is a single-host deployment platform in development. So far it has a Go
-health API and a Next.js shell with dark and light themes. The interface is not
-connected to the API yet. Projects and application deployment come next.
+health API and a Next.js shell with dark and light themes. The Overview checks
+whether the Go API is responding. Projects and application deployment come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Everything currently runs locally.
@@ -33,13 +33,25 @@ Set `SHIPYARD_API_ADDR` to change the API address, for example `127.0.0.1:9090` 
 Ctrl+C or SIGTERM allows active requests up to five seconds to finish before the
 API closes remaining connections. Startup and shutdown failures exit nonzero.
 
+The browser checks the Next.js `/api/health` route, which calls the Go endpoint.
+It shows checking, available, or unavailable, with a button to check again. This
+reports API liveness only and does not monitor deployed applications.
+
+For a different API address, set `SHIPYARD_API_URL` in `apps/web/.env.local` using
+`.env.example` as a reference, then restart Next.js. Use an HTTP(S) origin such as
+`http://127.0.0.1:9090`, without a path, credentials, query, or fragment. Development
+defaults to `http://127.0.0.1:8080`; production requires an explicit value. This
+server-only setting is not sent to the browser. Requests time out after three
+seconds, and failures return an uncached `503` without exposing upstream details.
+
 Geist and JetBrains Mono load through `next/font`; builds need access to Google
 Fonts. The theme defaults to dark and remembers changes in the browser.
 
 ## Checks
 
-Run `pnpm check` for formatting, lint, and TypeScript checks, then `pnpm build` for
-the production frontend build. Run `pnpm format` to apply formatting.
+Run `pnpm check` for formatting, lint, and TypeScript checks, `pnpm test` for the
+health integration tests, and `pnpm build` for the production frontend build.
+The build does not require a running API. Run `pnpm format` to apply formatting.
 
 From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,
 `go test -race ./...`, and `go build ./...`. The API uses only the Go standard

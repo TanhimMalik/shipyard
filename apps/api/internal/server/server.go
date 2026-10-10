@@ -1,0 +1,59 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
+)
+
+func New(config Config) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, "{\"status\":\"ok\"}\n")
+	})
+
+	return &http.Server{
+		Addr:              config.ListenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func Serve(ctx context.Context, httpServer *http.Server, listener net.Listener) error {
+	defer httpServer.Close()
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- httpServer.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveResult:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve HTTP: %w", err)
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		closeErr := httpServer.Close()
+		<-serveResult
+		return errors.Join(fmt.Errorf("shutdown HTTP: %w", err), closeErr)
+	}
+
+	if err := <-serveResult; !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve HTTP: %w", err)
+	}
+	return nil
+}

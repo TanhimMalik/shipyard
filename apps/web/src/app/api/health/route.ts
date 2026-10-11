@@ -12,6 +12,7 @@ export async function GET(request: Request) {
 
     if (
       !["http:", "https:"].includes(origin.protocol) ||
+      (process.env.VERCEL === "1" && origin.protocol !== "https:") ||
       origin.username ||
       origin.password ||
       origin.search ||

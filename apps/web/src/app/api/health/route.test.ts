@@ -9,10 +9,12 @@ function configureEnvironment(
   t: TestContext,
   apiUrl: string | undefined,
   nodeEnv = "production",
+  vercel = false,
 ) {
   const previous = {
     NODE_ENV: process.env.NODE_ENV,
     SHIPYARD_API_URL: process.env.SHIPYARD_API_URL,
+    VERCEL: process.env.VERCEL,
   };
 
   t.after(() => {
@@ -23,6 +25,8 @@ function configureEnvironment(
   });
 
   Reflect.set(process.env, "NODE_ENV", nodeEnv);
+  if (vercel) process.env.VERCEL = "1";
+  else Reflect.deleteProperty(process.env, "VERCEL");
   if (apiUrl === undefined) {
     Reflect.deleteProperty(process.env, "SHIPYARD_API_URL");
   } else {
@@ -136,6 +140,56 @@ describe("health proxy", { concurrency: false }, () => {
         assert.equal(fetchMock.mock.callCount(), 0);
       });
     }
+  });
+
+  test("requires HTTPS on Vercel", async (t) => {
+    for (const origin of ["http://api.example.test", "http://127.0.0.1:8080"]) {
+      await t.test(origin, async (t) => {
+        configureEnvironment(t, origin, "production", true);
+        const fetchMock = t.mock.method(globalThis, "fetch", async () => {
+          throw new Error("unexpected upstream request");
+        });
+        await assertUnavailable(await GET(new Request(requestUrl)));
+        assert.equal(fetchMock.mock.callCount(), 0);
+      });
+    }
+  });
+
+  test("stays unavailable without an API configured on Vercel", async (t) => {
+    configureEnvironment(t, undefined, "production", true);
+    const fetchMock = t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("unexpected upstream request");
+    });
+
+    await assertUnavailable(await GET(new Request(requestUrl)));
+    assert.equal(fetchMock.mock.callCount(), 0);
+  });
+
+  test("accepts a configured HTTPS API on Vercel", async (t) => {
+    configureEnvironment(t, "https://api.example.test", "production", true);
+    const fetchMock = t.mock.method(
+      globalThis,
+      "fetch",
+      async (input: RequestInfo | URL) => {
+        assert.equal(String(input), "https://api.example.test/api/health");
+        return Response.json({ status: "ok" });
+      },
+    );
+
+    const response = await GET(new Request(requestUrl));
+    assert.equal(response.status, 200);
+    assert.equal(fetchMock.mock.callCount(), 1);
+  });
+
+  test("allows a local production server to reach the loopback API", async (t) => {
+    configureEnvironment(t, "http://127.0.0.1:8080");
+    const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+      Response.json({ status: "ok" }),
+    );
+
+    const response = await GET(new Request(requestUrl));
+    assert.equal(response.status, 200);
+    assert.equal(fetchMock.mock.callCount(), 1);
   });
 
   test("rejects values that are not plain HTTP origins", async (t) => {

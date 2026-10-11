@@ -5,7 +5,8 @@ health API and a Next.js shell with dark and light themes. The Overview checks
 whether the Go API is responding. Projects and application deployment come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
-engine on one Linux Docker host. Everything currently runs locally.
+engine on one Linux Docker host. Vercel configuration is included; everything
+currently runs locally.
 
 ## Run locally
 
@@ -46,6 +47,33 @@ seconds, and failures return an uncached `503` without exposing upstream details
 
 Geist and JetBrains Mono load through `next/font`; builds need access to Google
 Fonts. The theme defaults to dark and remembers changes in the browser.
+
+## Vercel
+
+Import this repository into Vercel with these settings:
+
+- Root Directory: `apps/web`. Enable **Include source files outside of the Root
+  Directory in the Build Step** so the workspace files are available.
+- Framework Preset: **Next.js**. Use **Node.js 24.x** and leave Output Directory
+  at its default. `apps/web/vercel.json` supplies the install and build commands.
+- Set `ENABLE_EXPERIMENTAL_COREPACK=1` for Preview and Production to use the pinned
+  pnpm version. Keep **System Environment Variables** enabled.
+
+These follow Vercel's [monorepo setup](https://vercel.com/docs/monorepos) and
+[Corepack setup](https://vercel.com/docs/builds/configure-a-build#corepack).
+
+Leave `SHIPYARD_API_URL` unset until the Linux API has a reachable HTTPS origin.
+The frontend still builds and loads; its health check returns `503` and shows
+unavailable. Vercel cannot reach the API running on your computer's loopback
+address. When the Linux host is ready, set its HTTPS origin for each deployed
+environment and redeploy. With Vercel's `VERCEL=1` system variable, the health
+proxy rejects HTTP origins. Keep this setting server-only, without `NEXT_PUBLIC_`.
+
+The Go process stays on the Linux host, behind an HTTPS reverse proxy. Its current
+health endpoint only reports liveness. Protected single-admin access must be in
+place before adding remotely accessible project, deployment, or log endpoints.
+The health proxy does not provide authentication. A Vercel cloud build and the
+Linux host setup have not been verified yet.
 
 ## Checks
 

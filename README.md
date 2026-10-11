@@ -1,9 +1,9 @@
 # Shipyard
 
 Shipyard is a single-host deployment platform in development. So far it has a Go
-health API and a Next.js shell with dark and light themes. The Overview checks
-whether the Go API is responding. Project storage is in place; project APIs and
-application deployment come next.
+API and a Next.js shell with dark and light themes. The Overview checks whether
+the Go API is responding. Projects can be created and listed through the local
+API; project screens and application deployment come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -19,7 +19,8 @@ pnpm install
 pnpm dev
 ```
 
-Open http://127.0.0.1:3000. To run the API in another terminal:
+Open http://127.0.0.1:3000. Set up the database below, then run the API in a
+terminal with `SHIPYARD_DATABASE_URL` exported:
 
 ```sh
 cd apps/api
@@ -66,24 +67,48 @@ go run ./cmd/migrate up
 go run ./cmd/migrate status
 ```
 
-The command reads `SHIPYARD_DATABASE_URL` from the environment; it does not load
-`.env` files. It uses pgx and Goose with embedded SQL, transactions, and a
+The API and migration command read `SHIPYARD_DATABASE_URL` from the environment;
+they do not load `.env` files. API startup verifies the database connection within
+five seconds and exits nonzero if it cannot connect. Migrations run separately.
+The migration command uses pgx and Goose with embedded SQL, transactions, and a
 PostgreSQL advisory lock. Repeating `up` preserves data and skips applied
 migrations. The command has a 30-second deadline and supports only `up` and
 `status`.
 
 The initial schema contains only projects, with a unique lowercase slug, source
 configuration, app port, readiness path, and timestamps. Schema checks cover basic
-bounds; full repository and Git ref validation will arrive with the project API.
-Future update queries must set `updated_at` explicitly. The API health endpoint
-remains independent of the database. Project endpoints and UI connections are not
-implemented yet.
+bounds; the API also validates repository URLs, branch names, and health paths.
+Future update queries must set `updated_at` explicitly. While the API is running,
+its health endpoint reports process liveness even if the database goes down.
 
 Data persists in a named volume. From the repository root, stop PostgreSQL with
 `docker compose --env-file infrastructure/.env -f infrastructure/compose.yaml down`.
 Adding `-v` deletes its data. Changing the environment password does not change
 credentials in an initialized database. This Compose setup is for local
 development; its database role has administrative privileges.
+
+## Project API
+
+`POST /api/projects` accepts one JSON object with `name`, `slug`, `git_url`,
+`branch`, `app_port`, and `health_path`. Text is trimmed; slugs use lowercase
+letters and numbers with single hyphens. Repository URLs must use HTTPS without
+credentials, queries, or fragments. Branches must be bare branch names; health
+paths must start with `/` without queries, fragments, or traversal. All fields
+are required. This stores configuration; it does not fetch or build the source.
+
+Creation returns the saved project with its ID and timestamps (`201`). Invalid
+settings return field errors (`422`), and a duplicate slug returns `409`.
+Requests require `application/json` and are limited to 64 KiB.
+
+`GET /api/projects` returns `projects` and `next_offset` (null on the last page).
+It lists newest first, with IDs breaking timestamp ties. `limit` defaults to 50
+and accepts 1–100; `offset` defaults to zero. Offset pagination may shift when
+new projects are created between requests. Database failures return an uncached
+`503`; each database operation has a three-second deadline.
+
+Project endpoints accept loopback Host values and reject cross-origin writes.
+They have no CORS support or frontend proxy yet. These local checks are not admin
+authentication; protected access is required before exposing them remotely.
 
 ## Vercel
 
@@ -120,10 +145,12 @@ The build does not require a running API. Run `pnpm format` to apply formatting.
 
 From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,
 `go test -race ./...`, and `go build ./...`. Tests cover API configuration, health
-responses, routing, shutdown, and the migration CLI.
+responses, routing, shutdown, project validation and HTTP behavior, and the
+migration CLI.
 
 Database tests are opt-in. From `apps/api`, run
 `SHIPYARD_TEST_DATABASE_URL="$SHIPYARD_DATABASE_URL" go test -tags=integration ./...`
 against local PostgreSQL. Tests create and remove isolated schemas; the test role
 must be allowed to create schemas. They check migration reruns, preserved records,
-schema constraints, and concurrent migration commands.
+schema constraints, concurrent migration commands, project persistence, duplicate
+slugs, pagination order, and canceled queries.

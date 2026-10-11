@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"shipyard/apps/api/internal/database"
+	"shipyard/apps/api/internal/projects"
 	"shipyard/apps/api/internal/server"
 )
 
@@ -25,16 +27,21 @@ func run() error {
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	pool, err := database.Open(ctx, config.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
 	listener, err := net.Listen("tcp", config.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", config.ListenAddr, err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	slog.Info("API listening", "address", listener.Addr().String())
-	if err := server.Serve(ctx, server.New(config), listener); err != nil {
+	if err := server.Serve(ctx, server.New(config, projects.NewStore(pool)), listener); err != nil {
 		return err
 	}
 	slog.Info("API stopped")

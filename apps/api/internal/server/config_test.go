@@ -35,6 +35,9 @@ func TestLoadConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config, err := LoadConfig(func(key string) (string, bool) {
+				if key == "SHIPYARD_DATABASE_URL" {
+					return "postgres://shipyard@127.0.0.1/shipyard", true
+				}
 				if key != "SHIPYARD_API_ADDR" {
 					t.Fatalf("unexpected environment variable: %s", key)
 				}
@@ -53,5 +56,29 @@ func TestLoadConfig(t *testing.T) {
 				t.Errorf("ListenAddr = %q, want %q", config.ListenAddr, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRequiresDatabaseURL(t *testing.T) {
+	for _, value := range []string{"", " \t\n"} {
+		_, err := LoadConfig(func(key string) (string, bool) {
+			if key == "SHIPYARD_DATABASE_URL" {
+				return value, true
+			}
+			return "", false
+		})
+		if err == nil || !strings.Contains(err.Error(), "SHIPYARD_DATABASE_URL") {
+			t.Fatalf("expected missing database configuration error, got %v", err)
+		}
+	}
+	const url = "postgres://shipyard@127.0.0.1/shipyard"
+	config, err := LoadConfig(func(key string) (string, bool) {
+		if key == "SHIPYARD_DATABASE_URL" {
+			return url, true
+		}
+		return "", false
+	})
+	if err != nil || config.DatabaseURL != url {
+		t.Fatalf("database configuration = %q, %v", config.DatabaseURL, err)
 	}
 }

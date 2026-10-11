@@ -8,15 +8,20 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"shipyard/apps/api/internal/projects"
 )
 
-func New(config Config) *http.Server {
+func New(config Config, projectStore projects.Store) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = io.WriteString(w, "{\"status\":\"ok\"}\n")
 	})
+	if projectStore != nil {
+		mux.Handle("/api/projects", projects.NewHandler(projectStore))
+	}
 
 	return &http.Server{
 		Addr:              config.ListenAddr,

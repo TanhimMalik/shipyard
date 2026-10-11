@@ -3,10 +3,12 @@ package server
 import (
 	"errors"
 	"net/netip"
+	"strings"
 )
 
 type Config struct {
-	ListenAddr string
+	ListenAddr  string
+	DatabaseURL string
 }
 
 func LoadConfig(lookupEnv func(string) (string, bool)) (Config, error) {
@@ -23,5 +25,9 @@ func LoadConfig(lookupEnv func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("SHIPYARD_API_ADDR must use a loopback IP (127.0.0.1 or ::1)")
 	}
 
-	return Config{ListenAddr: address}, nil
+	databaseURL, _ := lookupEnv("SHIPYARD_DATABASE_URL")
+	if strings.TrimSpace(databaseURL) == "" {
+		return Config{}, errors.New("SHIPYARD_DATABASE_URL is required")
+	}
+	return Config{ListenAddr: address, DatabaseURL: databaseURL}, nil
 }

@@ -2,7 +2,7 @@
 
 Shipyard is a single-host deployment platform in development. So far it has a Go
 API and a Next.js shell with dark and light themes. The Overview checks whether
-the Go API is responding. Projects can be created and listed through the local
+the Go API is responding. Projects can be created, listed, viewed, edited, and deleted through the local
 API; project screens and application deployment come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
@@ -78,7 +78,7 @@ migrations. The command has a 30-second deadline and supports only `up` and
 The initial schema contains only projects, with a unique lowercase slug, source
 configuration, app port, readiness path, and timestamps. Schema checks cover basic
 bounds; the API also validates repository URLs, branch names, and health paths.
-Future update queries must set `updated_at` explicitly. While the API is running,
+Update queries set `updated_at` explicitly. While the API is running,
 its health endpoint reports process liveness even if the database goes down.
 
 Data persists in a named volume. From the repository root, stop PostgreSQL with
@@ -98,13 +98,26 @@ are required. This stores configuration; it does not fetch or build the source.
 
 Creation returns the saved project with its ID and timestamps (`201`). Invalid
 settings return field errors (`422`), and a duplicate slug returns `409`.
-Requests require `application/json` and are limited to 64 KiB.
+Create and update requests require `application/json` and are limited to 64 KiB.
+Unknown fields, null values, malformed JSON, and trailing objects return `400`.
 
 `GET /api/projects` returns `projects` and `next_offset` (null on the last page).
 It lists newest first, with IDs breaking timestamp ties. `limit` defaults to 50
 and accepts 1–100; `offset` defaults to zero. Offset pagination may shift when
 new projects are created between requests. Database failures return an uncached
 `503`; each database operation has a three-second deadline.
+
+`GET /api/projects/{id}` returns one project. `PATCH /api/projects/{id}` updates
+only supplied settings and returns the saved project. It uses the same validation
+as creation, accepts slug changes, and requires at least one field. Omitted fields
+stay unchanged; empty strings and zero ports fail validation. Updates preserve the
+ID and creation time, and refresh `updated_at`. Concurrent edits to different
+fields are preserved; edits to the same field use the last successful write.
+
+`DELETE /api/projects/{id}` removes the project configuration and returns `204`
+with no body. Malformed UUIDs return `400`; missing projects return `404`, including
+repeated deletes. These endpoints manage configuration only; no deployment
+resources exist yet.
 
 Project endpoints accept loopback Host values and reject cross-origin writes.
 They have no CORS support or frontend proxy yet. These local checks are not admin
@@ -153,4 +166,5 @@ Database tests are opt-in. From `apps/api`, run
 against local PostgreSQL. Tests create and remove isolated schemas; the test role
 must be allowed to create schemas. They check migration reruns, preserved records,
 schema constraints, concurrent migration commands, project persistence, duplicate
-slugs, pagination order, and canceled queries.
+slugs, partial and concurrent updates, deletion, pagination order, and canceled
+queries.

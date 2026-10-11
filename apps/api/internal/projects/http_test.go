@@ -61,9 +61,6 @@ func TestHTTPCreateProject(t *testing.T) {
 				t.Fatalf("status = %d, want 201; body = %s", response.Code, response.Body.String())
 			}
 			httpTestJSONHeaders(t, response)
-			if location := response.Header().Get("Location"); location != "" {
-				t.Errorf("Location = %q, but GET by ID is not implemented", location)
-			}
 			if store.createCalls != 1 || store.listCalls != 0 {
 				t.Fatalf("store calls: create = %d, list = %d", store.createCalls, store.listCalls)
 			}
@@ -108,6 +105,7 @@ func TestHTTPRejectsCreateBeforeStore(t *testing.T) {
 		{"wrong content type", valid, "text/plain", "", http.StatusUnsupportedMediaType},
 		{"malformed JSON", []byte("{"), "application/json", "", http.StatusBadRequest},
 		{"null JSON", []byte("null"), "application/json", "", http.StatusBadRequest},
+		{"null setting", []byte(`{"name":null}`), "application/json", "", http.StatusBadRequest},
 		{"array JSON", []byte("[]"), "application/json", "", http.StatusBadRequest},
 		{"unknown field", []byte(strings.TrimSuffix(httpTestCreateJSON, "}") + `,"unexpected":true}`), "application/json", "", http.StatusBadRequest},
 		{"trailing JSON", append([]byte(httpTestCreateJSON), []byte(" {}")...), "application/json", "", http.StatusBadRequest},
@@ -341,6 +339,18 @@ type httpTestStore struct {
 	list        func(context.Context, int, int) ([]Project, error)
 	createCalls int
 	listCalls   int
+}
+
+func (s *httpTestStore) Get(context.Context, string) (Project, error) {
+	return Project{}, errors.New("unexpected get call")
+}
+
+func (s *httpTestStore) Update(context.Context, string, PatchInput) (Project, error) {
+	return Project{}, errors.New("unexpected update call")
+}
+
+func (s *httpTestStore) Delete(context.Context, string) error {
+	return errors.New("unexpected delete call")
 }
 
 func (s *httpTestStore) Create(ctx context.Context, input CreateInput) (Project, error) {

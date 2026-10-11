@@ -10,11 +10,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrSlugTaken = errors.New("project slug already exists")
+var (
+	ErrSlugTaken = errors.New("project slug already exists")
+	ErrNotFound  = errors.New("project not found")
+)
 
 type Store interface {
 	Create(context.Context, CreateInput) (Project, error)
 	List(ctx context.Context, limit, offset int) ([]Project, error)
+	Get(ctx context.Context, id string) (Project, error)
+	Update(ctx context.Context, id string, input PatchInput) (Project, error)
+	Delete(ctx context.Context, id string) error
 }
 
 type PostgresStore struct {
@@ -61,6 +67,56 @@ func (s *PostgresStore) List(ctx context.Context, limit, offset int) ([]Project,
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
 	return projects, nil
+}
+
+func (s *PostgresStore) Get(ctx context.Context, id string) (Project, error) {
+	project, err := scanProject(s.pool.QueryRow(ctx, `
+		SELECT id::text, name, slug, git_url, branch, app_port, health_path, created_at, updated_at
+		FROM projects WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Project{}, ErrNotFound
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("get project: %w", err)
+	}
+	return project, nil
+}
+
+func (s *PostgresStore) Update(ctx context.Context, id string, input PatchInput) (Project, error) {
+	project, err := scanProject(s.pool.QueryRow(ctx, `
+		UPDATE projects
+		SET name = COALESCE($2, name),
+		    slug = COALESCE($3, slug),
+		    git_url = COALESCE($4, git_url),
+		    branch = COALESCE($5, branch),
+		    app_port = COALESCE($6, app_port),
+		    health_path = COALESCE($7, health_path),
+		    updated_at = clock_timestamp()
+		WHERE id = $1
+		RETURNING id::text, name, slug, git_url, branch, app_port, health_path, created_at, updated_at`,
+		id, input.Name, input.Slug, input.GitURL, input.Branch, input.AppPort, input.HealthPath))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Project{}, ErrNotFound
+	}
+	if err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.Code == "23505" && postgresError.ConstraintName == "projects_slug_key" {
+			return Project{}, ErrSlugTaken
+		}
+		return Project{}, fmt.Errorf("update project: %w", err)
+	}
+	return project, nil
+}
+
+func (s *PostgresStore) Delete(ctx context.Context, id string) error {
+	result, err := s.pool.Exec(ctx, "DELETE FROM projects WHERE id = $1", id)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func scanProject(row pgx.Row) (Project, error) {

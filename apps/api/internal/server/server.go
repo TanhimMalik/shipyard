@@ -20,7 +20,9 @@ func New(config Config, projectStore projects.Store) *http.Server {
 		_, _ = io.WriteString(w, "{\"status\":\"ok\"}\n")
 	})
 	if projectStore != nil {
-		mux.Handle("/api/projects", projects.NewHandler(projectStore))
+		projectHandler := projects.NewHandler(projectStore)
+		mux.Handle("/api/projects", projectHandler)
+		mux.Handle("/api/projects/", projectHandler)
 	}
 
 	return &http.Server{

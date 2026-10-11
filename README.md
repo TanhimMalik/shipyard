@@ -2,7 +2,8 @@
 
 Shipyard is a single-host deployment platform in development. So far it has a Go
 health API and a Next.js shell with dark and light themes. The Overview checks
-whether the Go API is responding. Projects and application deployment come next.
+whether the Go API is responding. Project storage is in place; project APIs and
+application deployment come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -48,6 +49,42 @@ seconds, and failures return an uncached `503` without exposing upstream details
 Geist and JetBrains Mono load through `next/font`; builds need access to Google
 Fonts. The theme defaults to dark and remembers changes in the browser.
 
+## Database
+
+Docker with Compose is required. From the repository root, create the ignored
+`infrastructure/.env`, start PostgreSQL on `127.0.0.1:5432`, and apply migrations:
+
+```sh
+test -f infrastructure/.env || (
+  umask 077
+  printf 'SHIPYARD_DB_PASSWORD=%s\n' "$(openssl rand -hex 32)" > infrastructure/.env
+)
+docker compose --env-file infrastructure/.env -f infrastructure/compose.yaml up -d --wait
+export SHIPYARD_DATABASE_URL="postgres://shipyard:$(sed -n 's/^SHIPYARD_DB_PASSWORD=//p' infrastructure/.env)@127.0.0.1:5432/shipyard?sslmode=disable"
+cd apps/api
+go run ./cmd/migrate up
+go run ./cmd/migrate status
+```
+
+The command reads `SHIPYARD_DATABASE_URL` from the environment; it does not load
+`.env` files. It uses pgx and Goose with embedded SQL, transactions, and a
+PostgreSQL advisory lock. Repeating `up` preserves data and skips applied
+migrations. The command has a 30-second deadline and supports only `up` and
+`status`.
+
+The initial schema contains only projects, with a unique lowercase slug, source
+configuration, app port, readiness path, and timestamps. Schema checks cover basic
+bounds; full repository and Git ref validation will arrive with the project API.
+Future update queries must set `updated_at` explicitly. The API health endpoint
+remains independent of the database. Project endpoints and UI connections are not
+implemented yet.
+
+Data persists in a named volume. From the repository root, stop PostgreSQL with
+`docker compose --env-file infrastructure/.env -f infrastructure/compose.yaml down`.
+Adding `-v` deletes its data. Changing the environment password does not change
+credentials in an initialized database. This Compose setup is for local
+development; its database role has administrative privileges.
+
 ## Vercel
 
 Import this repository into Vercel with these settings:
@@ -82,5 +119,11 @@ health integration tests, and `pnpm build` for the production frontend build.
 The build does not require a running API. Run `pnpm format` to apply formatting.
 
 From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,
-`go test -race ./...`, and `go build ./...`. The API uses only the Go standard
-library. Its tests cover configuration, health responses, routing, and shutdown.
+`go test -race ./...`, and `go build ./...`. Tests cover API configuration, health
+responses, routing, shutdown, and the migration CLI.
+
+Database tests are opt-in. From `apps/api`, run
+`SHIPYARD_TEST_DATABASE_URL="$SHIPYARD_DATABASE_URL" go test -tags=integration ./...`
+against local PostgreSQL. Tests create and remove isolated schemas; the test role
+must be allowed to create schemas. They check migration reruns, preserved records,
+schema constraints, and concurrent migration commands.

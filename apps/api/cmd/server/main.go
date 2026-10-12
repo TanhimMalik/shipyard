@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"shipyard/apps/api/internal/database"
+	"shipyard/apps/api/internal/deployments"
 	"shipyard/apps/api/internal/projects"
 	"shipyard/apps/api/internal/server"
 )
@@ -41,7 +42,7 @@ func run() error {
 	}
 
 	slog.Info("API listening", "address", listener.Addr().String())
-	if err := server.Serve(ctx, server.New(config, projects.NewStore(pool)), listener); err != nil {
+	if err := server.Serve(ctx, server.New(config, projects.NewStore(pool), deployments.NewStore(pool)), listener); err != nil {
 		return err
 	}
 	slog.Info("API stopped")

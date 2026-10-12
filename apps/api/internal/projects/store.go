@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrSlugTaken = errors.New("project slug already exists")
-	ErrNotFound  = errors.New("project not found")
+	ErrSlugTaken      = errors.New("project slug already exists")
+	ErrNotFound       = errors.New("project not found")
+	ErrHasDeployments = errors.New("project has deployment history")
 )
 
 type Store interface {
@@ -111,6 +112,10 @@ func (s *PostgresStore) Update(ctx context.Context, id string, input PatchInput)
 func (s *PostgresStore) Delete(ctx context.Context, id string) error {
 	result, err := s.pool.Exec(ctx, "DELETE FROM projects WHERE id = $1", id)
 	if err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && (postgresError.Code == "23001" || postgresError.Code == "23503") && postgresError.ConstraintName == "deployments_project_id_fkey" {
+			return ErrHasDeployments
+		}
 		return fmt.Errorf("delete project: %w", err)
 	}
 	if result.RowsAffected() == 0 {

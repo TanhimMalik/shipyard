@@ -15,7 +15,7 @@ import (
 
 func TestHealth(t *testing.T) {
 	response := httptest.NewRecorder()
-	New(Config{}, nil).Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	New(Config{}, nil, nil).Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.Code)
 	}
@@ -45,7 +45,7 @@ func TestHealthRouting(t *testing.T) {
 		{http.MethodGet, "/api/health/", http.StatusNotFound},
 		{http.MethodGet, "/api/unknown", http.StatusNotFound},
 	}
-	handler := New(Config{}, nil).Handler
+	handler := New(Config{}, nil, nil).Handler
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -72,7 +72,7 @@ func TestServeDrainsActiveRequest(t *testing.T) {
 	var releaseOnce sync.Once
 	finishRequest := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(finishRequest)
-	httpServer := New(Config{}, nil)
+	httpServer := New(Config{}, nil, nil)
 	httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
 		<-release
@@ -119,7 +119,7 @@ func TestServeReturnsListenerError(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := Serve(t.Context(), New(Config{}, nil), listener); !errors.Is(err, net.ErrClosed) {
+	if err := Serve(t.Context(), New(Config{}, nil, nil), listener); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("expected closed-listener error, got %v", err)
 	}
 }

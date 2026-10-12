@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"time"
 
+	"shipyard/apps/api/internal/deployments"
 	"shipyard/apps/api/internal/projects"
 )
 
-func New(config Config, projectStore projects.Store) *http.Server {
+func New(config Config, projectStore projects.Store, deploymentStore deployments.Store) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -23,6 +24,13 @@ func New(config Config, projectStore projects.Store) *http.Server {
 		projectHandler := projects.NewHandler(projectStore)
 		mux.Handle("/api/projects", projectHandler)
 		mux.Handle("/api/projects/", projectHandler)
+	}
+
+	if deploymentStore != nil {
+		deploymentHandler := deployments.NewHandler(deploymentStore)
+		mux.Handle("/api/projects/{projectID}/deployments", deploymentHandler)
+		mux.Handle("/api/deployments", deploymentHandler)
+		mux.Handle("/api/deployments/", deploymentHandler)
 	}
 
 	return &http.Server{

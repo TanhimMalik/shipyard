@@ -7,20 +7,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"mime"
-	"net"
 	"net/http"
-	"net/netip"
-	"net/url"
-	"regexp"
-	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
-)
 
-var projectIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	"shipyard/apps/api/internal/httpapi"
+)
 
 func NewHandler(store Store) http.Handler {
 	mux := http.NewServeMux()
@@ -39,31 +32,7 @@ func NewHandler(store Store) http.Handler {
 	mux.HandleFunc("DELETE /api/projects/{id}", func(w http.ResponseWriter, r *http.Request) {
 		deleteProject(w, r, store)
 	})
-	protection := http.NewCrossOriginProtection()
-	protection.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusForbidden, "Cross-origin project requests are not allowed.")
-	}))
-	protected := protection.Handler(mux)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Loopback binding alone does not protect against DNS rebinding.
-		if !localHost(r.Host) {
-			writeError(w, http.StatusForbidden, "Project requests must use a loopback host.")
-			return
-		}
-		protected.ServeHTTP(w, r)
-	})
-}
-
-func localHost(authority string) bool {
-	host := authority
-	if parsed, _, err := net.SplitHostPort(authority); err == nil {
-		host = parsed
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	address, err := netip.ParseAddr(strings.TrimPrefix(strings.TrimSuffix(host, "]"), "["))
-	return err == nil && address.Unmap().IsLoopback()
+	return httpapi.LocalOnly(mux)
 }
 
 func createProject(w http.ResponseWriter, r *http.Request, store Store) {
@@ -83,7 +52,7 @@ func createProject(w http.ResponseWriter, r *http.Request, store Store) {
 		writeStoreError(w, "create", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, project)
+	httpapi.WriteJSON(w, http.StatusCreated, project)
 }
 
 func getProject(w http.ResponseWriter, r *http.Request, store Store) {
@@ -98,7 +67,7 @@ func getProject(w http.ResponseWriter, r *http.Request, store Store) {
 		writeStoreError(w, "get", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, project)
+	httpapi.WriteJSON(w, http.StatusOK, project)
 }
 
 func patchProject(w http.ResponseWriter, r *http.Request, store Store) {
@@ -111,7 +80,7 @@ func patchProject(w http.ResponseWriter, r *http.Request, store Store) {
 		return
 	}
 	if input.empty() {
-		writeError(w, http.StatusBadRequest, "Provide at least one project setting to update.")
+		httpapi.WriteError(w, http.StatusBadRequest, "Provide at least one project setting to update.")
 		return
 	}
 	normalized, fields := ValidatePatch(*input)
@@ -126,7 +95,7 @@ func patchProject(w http.ResponseWriter, r *http.Request, store Store) {
 		writeStoreError(w, "update", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, project)
+	httpapi.WriteJSON(w, http.StatusOK, project)
 }
 
 func deleteProject(w http.ResponseWriter, r *http.Request, store Store) {
@@ -140,14 +109,14 @@ func deleteProject(w http.ResponseWriter, r *http.Request, store Store) {
 		writeStoreError(w, "delete", err)
 		return
 	}
-	setResponseHeaders(w)
+	httpapi.SetResponseHeaders(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func requestProjectID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := r.PathValue("id")
-	if !projectIDPattern.MatchString(id) {
-		writeError(w, http.StatusBadRequest, "Use a UUID project ID.")
+	if !httpapi.ValidID(id) {
+		httpapi.WriteError(w, http.StatusBadRequest, "Use a UUID project ID.")
 		return "", false
 	}
 	return id, true
@@ -156,7 +125,7 @@ func requestProjectID(w http.ResponseWriter, r *http.Request) (string, bool) {
 func decodeInput[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		writeError(w, http.StatusUnsupportedMediaType, "Use application/json.")
+		httpapi.WriteError(w, http.StatusUnsupportedMediaType, "Use application/json.")
 		return nil, false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
@@ -164,9 +133,9 @@ func decodeInput[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "Request body must be at most 64 KiB.")
+			httpapi.WriteError(w, http.StatusRequestEntityTooLarge, "Request body must be at most 64 KiB.")
 		} else {
-			writeError(w, http.StatusBadRequest, "Could not read request body.")
+			httpapi.WriteError(w, http.StatusBadRequest, "Could not read request body.")
 		}
 		return nil, false
 	}
@@ -174,17 +143,17 @@ func decodeInput[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if !utf8.Valid(body) || decoder.Decode(&input) != nil || input == nil || decoder.Decode(new(any)) != io.EOF {
-		writeError(w, http.StatusBadRequest, "Provide one JSON object containing project settings.")
+		httpapi.WriteError(w, http.StatusBadRequest, "Provide one JSON object containing project settings.")
 		return nil, false
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
-		writeError(w, http.StatusBadRequest, "Provide one JSON object containing project settings.")
+		httpapi.WriteError(w, http.StatusBadRequest, "Provide one JSON object containing project settings.")
 		return nil, false
 	}
 	for _, value := range fields {
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			writeError(w, http.StatusBadRequest, "Project settings cannot be null.")
+			httpapi.WriteError(w, http.StatusBadRequest, "Project settings cannot be null.")
 			return nil, false
 		}
 	}
@@ -192,9 +161,9 @@ func decodeInput[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
 }
 
 func listProjects(w http.ResponseWriter, r *http.Request, store Store) {
-	limit, offset, err := pagination(r.URL.RawQuery)
+	limit, offset, err := httpapi.Pagination(r.URL.RawQuery)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Use limit from 1 to 100 and a nonnegative offset, each supplied once.")
+		httpapi.WriteError(w, http.StatusBadRequest, "Use limit from 1 to 100 and a nonnegative offset, each supplied once.")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -213,46 +182,14 @@ func listProjects(w http.ResponseWriter, r *http.Request, store Store) {
 	if projects == nil {
 		projects = []Project{}
 	}
-	writeJSON(w, http.StatusOK, struct {
+	httpapi.WriteJSON(w, http.StatusOK, struct {
 		Projects   []Project `json:"projects"`
 		NextOffset *int      `json:"next_offset"`
 	}{projects, nextOffset})
 }
 
-func pagination(rawQuery string) (int, int, error) {
-	query, err := url.ParseQuery(rawQuery)
-	if err != nil {
-		return 0, 0, err
-	}
-	limit, offset := 50, 0
-	for key, values := range query {
-		if (key != "limit" && key != "offset") || len(values) != 1 {
-			return 0, 0, errors.New("unknown or repeated pagination parameter")
-		}
-		value, err := strconv.Atoi(values[0])
-		if err != nil {
-			return 0, 0, err
-		}
-		if key == "limit" {
-			limit = value
-		} else {
-			offset = value
-		}
-	}
-	if limit < 1 || limit > 100 || offset < 0 || offset > math.MaxInt-limit {
-		return 0, 0, errors.New("pagination out of range")
-	}
-	return limit, offset, nil
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, struct {
-		Error string `json:"error"`
-	}{message})
-}
-
 func writeValidationError(w http.ResponseWriter, fields map[string]string) {
-	writeJSON(w, http.StatusUnprocessableEntity, struct {
+	httpapi.WriteJSON(w, http.StatusUnprocessableEntity, struct {
 		Error  string            `json:"error"`
 		Fields map[string]string `json:"fields"`
 	}{"Check the project settings.", fields})
@@ -261,25 +198,13 @@ func writeValidationError(w http.ResponseWriter, fields map[string]string) {
 func writeStoreError(w http.ResponseWriter, operation string, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
-		writeError(w, http.StatusNotFound, "Project not found.")
+		httpapi.WriteError(w, http.StatusNotFound, "Project not found.")
+	case errors.Is(err, ErrHasDeployments):
+		httpapi.WriteError(w, http.StatusConflict, "Projects with deployment history cannot be deleted.")
 	case errors.Is(err, ErrSlugTaken):
-		writeError(w, http.StatusConflict, "A project with this slug already exists.")
+		httpapi.WriteError(w, http.StatusConflict, "A project with this slug already exists.")
 	default:
 		slog.Error("Project storage unavailable", "operation", operation)
-		writeError(w, http.StatusServiceUnavailable, "Project storage is unavailable. Try again later.")
-	}
-}
-
-func setResponseHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	setResponseHeaders(w)
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		slog.Debug("Could not write project response")
+		httpapi.WriteError(w, http.StatusServiceUnavailable, "Project storage is unavailable. Try again later.")
 	}
 }

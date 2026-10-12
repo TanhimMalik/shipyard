@@ -4,7 +4,8 @@ Shipyard is a single-host deployment platform in development. So far it has a Go
 API and a Next.js UI with dark and light themes. The Overview checks whether
 the Go API is responding. Local project screens let you create a project, browse
 the directory, and view its saved settings. The API also supports editing and
-deleting configuration. Application deployment comes later.
+deleting configuration. Deployment attempts can be queued and inspected through
+the local API; source checkout, builds, and container startup come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -117,8 +118,8 @@ fields are preserved; edits to the same field use the last successful write.
 
 `DELETE /api/projects/{id}` removes the project configuration and returns `204`
 with no body. Malformed UUIDs return `400`; missing projects return `404`, including
-repeated deletes. These endpoints manage configuration only; no deployment
-resources exist yet.
+repeated deletes. A project with deployment history returns `409` and stays intact.
+These endpoints manage configuration; they do not stop or remove containers.
 
 Project endpoints accept loopback Host values and reject cross-origin writes.
 They have no CORS support. These local checks are not admin authentication;
@@ -136,6 +137,30 @@ Project routes are disabled whenever Vercel's system variable is present, even
 if `SHIPYARD_API_URL` points to a remote HTTPS API. The browser sends no database
 credentials, and the gateway does not forward browser cookies or authorization.
 Editing and deletion remain API-only for now.
+
+## Deployment attempts
+
+`POST /api/projects/{id}/deployments` creates a `QUEUED` attempt and returns its
+saved record (`201`) with a `Location` pointing to `/api/deployments/{id}`. Send no
+body, or an empty JSON object with `Content-Type: application/json`. Settings and
+status cannot be supplied by the client; they come from the saved project.
+
+Each attempt snapshots the Git URL, requested branch, application port, and health
+path in one database operation. Later project edits leave that attempt unchanged.
+The branch is still a requested name; no commit has been fetched or resolved yet.
+One queued attempt is allowed per project, including concurrent requests; another
+returns `409`.
+
+`GET /api/projects/{id}/deployments` returns `deployments` and `next_offset`, using
+the same limit and offset rules as the project directory. An existing project with
+no attempts returns an empty list; a missing project returns `404`.
+`GET /api/deployments/{id}` returns one saved attempt. Reads and writes use the
+same local access checks and three-second database deadline as project endpoints.
+Storage failures return a sanitized, uncached `503`.
+
+This milestone stores attempts only. There is no executor yet: queued records
+survive restarts, stay queued, and block another attempt until execution is added.
+There is no deployment button or frontend gateway for these endpoints yet.
 
 ## Vercel
 
@@ -173,7 +198,7 @@ The build does not require a running API. Run `pnpm format` to apply formatting.
 From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,
 `go test -race ./...`, and `go build ./...`. Tests cover API configuration, health
 responses, routing, shutdown, project validation and HTTP behavior, and the
-migration CLI.
+migration CLI, deployment request handling, and history-preserving deletion.
 
 Database tests are opt-in. From `apps/api`, run
 `SHIPYARD_TEST_DATABASE_URL="$SHIPYARD_DATABASE_URL" go test -tags=integration ./...`
@@ -181,4 +206,5 @@ against local PostgreSQL. Tests create and remove isolated schemas; the test rol
 must be allowed to create schemas. They check migration reruns, preserved records,
 schema constraints, concurrent migration commands, project persistence, duplicate
 slugs, partial and concurrent updates, deletion, pagination order, and canceled
-queries.
+queries. Deployment tests check saved snapshots, concurrent queueing, persistence,
+project deletion races, and migration upgrades.

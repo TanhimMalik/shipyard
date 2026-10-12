@@ -343,3 +343,18 @@ func httpDetailProjectResponse(t *testing.T, response *httptest.ResponseRecorder
 }
 
 func httpDetailPointer[T any](value T) *T { return &value }
+
+func TestHTTPDeletePreservesDeploymentHistory(t *testing.T) {
+	store := &httpDetailStore{delete: func(context.Context, string) error {
+		return fmt.Errorf("private-sentinel: %w", ErrHasDeployments)
+	}}
+	response := httptest.NewRecorder()
+	NewHandler(store).ServeHTTP(response, httpDetailRequest(http.MethodDelete, httpDetailURL, ""))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", response.Code, response.Body.String())
+	}
+	httpTestErrorJSON(t, response)
+	if !strings.Contains(response.Body.String(), "deployment history") || strings.Contains(response.Body.String(), "private-sentinel") {
+		t.Errorf("unexpected conflict message: %s", response.Body.String())
+	}
+}

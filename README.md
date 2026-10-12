@@ -1,9 +1,10 @@
 # Shipyard
 
 Shipyard is a single-host deployment platform in development. So far it has a Go
-API and a Next.js shell with dark and light themes. The Overview checks whether
-the Go API is responding. Projects can be created, listed, viewed, edited, and deleted through the local
-API; project screens and application deployment come next.
+API and a Next.js UI with dark and light themes. The Overview checks whether
+the Go API is responding. Local project screens let you create a project, browse
+the directory, and view its saved settings. The API also supports editing and
+deleting configuration. Application deployment comes later.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -120,8 +121,21 @@ repeated deletes. These endpoints manage configuration only; no deployment
 resources exist yet.
 
 Project endpoints accept loopback Host values and reject cross-origin writes.
-They have no CORS support or frontend proxy yet. These local checks are not admin
-authentication; protected access is required before exposing them remotely.
+They have no CORS support. These local checks are not admin authentication;
+protected access is required before exposing them remotely.
+
+Open `/projects` in the local web app to view the directory. The form at
+`/projects/new` saves the six required settings and opens the new project's detail
+page. The directory loads 20 records at a time and can refresh or load more.
+Validation errors keep the form values intact. Creation is never retried
+automatically; after an uncertain response, check the directory before resubmitting.
+
+These screens call guarded Next.js routes for listing, creation, and detail reads.
+Both the incoming host and configured API origin must be loopback addresses.
+Project routes are disabled whenever Vercel's system variable is present, even
+if `SHIPYARD_API_URL` points to a remote HTTPS API. The browser sends no database
+credentials, and the gateway does not forward browser cookies or authorization.
+Editing and deletion remain API-only for now.
 
 ## Vercel
 
@@ -153,7 +167,7 @@ Linux host setup have not been verified yet.
 ## Checks
 
 Run `pnpm check` for formatting, lint, and TypeScript checks, `pnpm test` for the
-health integration tests, and `pnpm build` for the production frontend build.
+health and project integration tests, and `pnpm build` for the production frontend build.
 The build does not require a running API. Run `pnpm format` to apply formatting.
 
 From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,

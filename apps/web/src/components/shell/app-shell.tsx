@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { ThemeToggle } from "../theme-toggle";
 import { MobileNavigation } from "./mobile-navigation";
 import { SidebarContent } from "./sidebar-content";
+import { ShellBreadcrumb } from "./shell-breadcrumb";
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
@@ -21,11 +22,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <header className="flex h-16 items-center justify-between gap-3 border-b border-border px-4 md:px-6">
           <div className="flex min-w-0 items-center gap-2 text-sm">
             <MobileNavigation />
-            <span className="text-secondary-foreground">Shipyard</span>
-            <span aria-hidden="true" className="text-border-strong">
-              /
-            </span>
-            <span>Overview</span>
+            <ShellBreadcrumb />
           </div>
           <ThemeToggle />
         </header>

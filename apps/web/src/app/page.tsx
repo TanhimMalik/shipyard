@@ -1,4 +1,5 @@
 import { FolderOpen } from "lucide-react";
+import Link from "next/link";
 import { ApiHealth } from "../components/api-health";
 
 export default function OverviewPage() {
@@ -20,8 +21,14 @@ export default function OverviewPage() {
           Welcome to Shipyard
         </h2>
         <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
-          Your projects and deployment activity will appear here.
+          Add a project to save its repository and runtime settings.
         </p>
+        <Link
+          href="/projects"
+          className="mt-4 inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted"
+        >
+          View projects
+        </Link>
       </section>
     </div>
   );

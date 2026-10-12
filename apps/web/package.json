@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
     "lint": "eslint",
-    "test": "node --test src/app/api/health/route.test.ts",
+    "test": "node --test src/app/api/health/route.test.ts src/lib/server/projects.test.ts src/lib/project-client.test.ts",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {

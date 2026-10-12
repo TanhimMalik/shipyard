@@ -1,7 +1,15 @@
-import { LayoutDashboard } from "lucide-react";
+"use client";
+
+import { FolderOpen, LayoutDashboard } from "lucide-react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { BrandMark } from "../brand-mark";
+
+const links = [
+  { href: "/", label: "Overview", icon: LayoutDashboard },
+  { href: "/projects", label: "Projects", icon: FolderOpen },
+];
 
 export function SidebarContent({
   closeButton,
@@ -10,6 +18,8 @@ export function SidebarContent({
   closeButton?: ReactNode;
   onNavigate?: () => void;
 }) {
+  const pathname = usePathname();
+
   return (
     <>
       <div className="flex h-16 items-center justify-between border-b border-border px-4">
@@ -24,17 +34,25 @@ export function SidebarContent({
         </Link>
         {closeButton}
       </div>
-
-      <nav aria-label="Main navigation" className="p-3">
-        <Link
-          href="/"
-          aria-current="page"
-          onClick={onNavigate}
-          className="flex min-h-11 items-center gap-3 rounded-lg bg-muted px-3 text-sm font-medium text-sidebar-foreground"
-        >
-          <LayoutDashboard size={18} aria-hidden="true" />
-          Overview
-        </Link>
+      <nav aria-label="Main navigation" className="space-y-1 p-3">
+        {links.map(({ href, label, icon: Icon }) => {
+          const active =
+            href === "/"
+              ? pathname === href
+              : pathname === href || pathname.startsWith(`${href}/`);
+          return (
+            <Link
+              key={href}
+              href={href}
+              aria-current={active ? "page" : undefined}
+              onClick={onNavigate}
+              className={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium ${active ? "bg-muted text-sidebar-foreground" : "text-muted-foreground hover:bg-muted hover:text-sidebar-foreground"}`}
+            >
+              <Icon size={18} aria-hidden="true" />
+              {label}
+            </Link>
+          );
+        })}
       </nav>
     </>
   );

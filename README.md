@@ -154,9 +154,9 @@ status cannot be supplied by the client; they come from the saved project.
 
 Each attempt snapshots the Git URL, requested branch, application port, and health
 path in one database operation. Later project edits leave that attempt unchanged.
-The branch is still a requested name; no commit has been fetched or resolved yet.
-One queued attempt is allowed per project, including concurrent requests; another
-returns `409`.
+The branch is still a requested name when queued. One unfinished attempt is allowed
+per project, across `QUEUED` and `FETCHING_SOURCE`, including concurrent requests;
+another returns `409`. Failed attempts remain in history and allow a new attempt.
 
 `GET /api/projects/{id}/deployments` returns `deployments` and `next_offset`, using
 the same limit and offset rules as the project directory. An existing project with
@@ -164,10 +164,24 @@ no attempts returns an empty list; a missing project returns `404`.
 `GET /api/deployments/{id}` returns one saved attempt. Reads and writes use the
 same local access checks and three-second database deadline as project endpoints.
 Storage failures return a sanitized, uncached `503`.
+Records include nullable `commit_sha`, `failure_stage`, `failure_reason`,
+`started_at`, and `finished_at`. Claim tokens are private and never returned.
 
-This milestone stores attempts only. There is no executor yet: queued records
-survive restarts, stay queued, and block another attempt until execution is added.
-There is no deployment button or frontend gateway for these endpoints yet.
+Internal storage methods can claim the oldest available queued attempt, record
+its exact source commit, and mark a source failure. Claims use row locks and an
+ownership token; a stale token cannot write results. Commit recording is
+write-once, with harmless retries of the same SHA. A source failure records a
+bounded public reason and finish time, clears ownership, and keeps any recorded
+commit. Failed attempts cannot be claimed again.
+
+There is no executor yet: the API only creates queued attempts. No background
+process calls the claim methods, fetches source, or changes deployment status.
+The storage methods are tested separately. Claims and their metadata survive
+restarts; interrupted-claim recovery will arrive with exclusive worker ownership.
+Successful checkout handoff will arrive with the image build step, so there is
+no synthetic build or success status. There is no deployment button or frontend
+gateway for these endpoints yet. Run migrations before starting the updated API;
+downgrading the execution migration refuses to discard source or lifecycle data.
 
 ## Source checkout
 
@@ -176,8 +190,8 @@ returns its exact commit SHA and detached checkout. It requires Git 2.39 or newe
 on macOS or Linux, linked with libcurl 7.59 or newer; use a patched Git installation.
 The caller supplies an explicit list of approved repository URLs and closes the
 checkout when finished. Only an exact URL match is allowed. This module is not
-connected to queued attempts yet,
-so it does not change deployment status or persist the commit.
+connected to queued attempts yet, so it does not change deployment status or
+persist the commit itself.
 The workspace root must have private permissions and belong to the service user.
 Place it beneath a stable parent controlled by that user, rather than an arbitrary
 shared directory. Filesystem permissions do not isolate processes sharing a UID.
@@ -248,8 +262,9 @@ against local PostgreSQL. Tests create and remove isolated schemas; the test rol
 must be allowed to create schemas. They check migration reruns, preserved records,
 schema constraints, concurrent migration commands, project persistence, duplicate
 slugs, partial and concurrent updates, deletion, pagination order, and canceled
-queries. Deployment tests check saved snapshots, concurrent queueing, persistence,
-project deletion races, and migration upgrades.
+queries. Deployment tests check saved snapshots, concurrent queueing and claiming,
+claim ownership, exact commit persistence, terminal failures, history pagination,
+project deletion races, and migration upgrades and downgrade safety.
 
 With the supported Git installation and `git-http-backend` available, the
 integration suite also uses a local HTTPS Git server to check exact branch

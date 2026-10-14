@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -151,8 +152,7 @@ func TestDeploymentListScopesProjectsAndAppliesOffset(t *testing.T) {
 		}
 		assertDeploymentEqual(t, listed[0], queuedByProject[project.ID])
 	}
-	// Only QUEUED is implemented, so each project currently has at most one row.
-	// History ordering across multiple statuses will be exercised when those exist.
+	// Both projects have one unfinished attempt in this test.
 	listed, err := store.List(ctx, first.ID, 1, 1)
 	if err != nil || len(listed) != 0 {
 		t.Errorf("offset past project history: count = %d, error = %v; want empty", len(listed), err)
@@ -335,9 +335,7 @@ func createDeploymentTestProject(t *testing.T, ctx context.Context, pool *pgxpoo
 
 func assertDeploymentEqual(t *testing.T, got, want Deployment) {
 	t.Helper()
-	if got.ID != want.ID || got.ProjectID != want.ProjectID || got.GitURL != want.GitURL ||
-		got.Branch != want.Branch || got.AppPort != want.AppPort || got.HealthPath != want.HealthPath ||
-		got.Status != want.Status || !got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deployment = %+v, want %+v", got, want)
 	}
 }

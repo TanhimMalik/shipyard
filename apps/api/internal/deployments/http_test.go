@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -210,6 +211,19 @@ func TestHTTPGetDeployment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHTTPGetDeploymentExecutionMetadata(t *testing.T) {
+	want := httpTestDeployment(httpTestDeploymentID)
+	commit, stage, reason := strings.Repeat("a", 40), StatusFetchingSource, "The repository branch could not be fetched."
+	started, finished := want.CreatedAt.Add(time.Second), want.CreatedAt.Add(2*time.Second)
+	want.Status, want.CommitSHA = StatusFailed, &commit
+	want.FailureStage, want.FailureReason = &stage, &reason
+	want.StartedAt, want.FinishedAt, want.UpdatedAt = &started, &finished, finished
+	store := &httpTestStore{get: func(context.Context, string) (Deployment, error) { return want, nil }}
+	response := httptest.NewRecorder()
+	NewHandler(store).ServeHTTP(response, httptest.NewRequest(http.MethodGet, httpTestDetailURL, nil))
+	httpTestDeploymentResponse(t, response, http.StatusOK, want)
 }
 
 func TestHTTPRejectsInvalidIDsBeforeStore(t *testing.T) {
@@ -455,7 +469,7 @@ func httpTestDeploymentResponse(t *testing.T, response *httptest.ResponseRecorde
 	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deployment = %+v, want %+v", got, want)
 	}
 	var fields map[string]json.RawMessage
@@ -467,7 +481,7 @@ func httpTestDeploymentResponse(t *testing.T, response *httptest.ResponseRecorde
 		gotFields = append(gotFields, field)
 	}
 	slices.Sort(gotFields)
-	wantFields := []string{"app_port", "branch", "created_at", "git_url", "health_path", "id", "project_id", "status", "updated_at"}
+	wantFields := []string{"app_port", "branch", "commit_sha", "created_at", "failure_reason", "failure_stage", "finished_at", "git_url", "health_path", "id", "project_id", "started_at", "status", "updated_at"}
 	if !slices.Equal(gotFields, wantFields) {
 		t.Errorf("deployment JSON fields = %v, want %v", gotFields, wantFields)
 	}

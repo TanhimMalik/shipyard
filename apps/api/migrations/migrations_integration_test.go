@@ -35,12 +35,12 @@ func TestProjectsMigrationPreservesDataOnRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply initial migration: %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("initial migration applied %d migrations, want 2", len(results))
+	if len(results) != 3 {
+		t.Fatalf("initial migration applied %d migrations, want 3", len(results))
 	}
 	version, err := provider.GetDBVersion(ctx)
-	if err != nil || version != 2 {
-		t.Fatalf("migration version = %d, error = %v; want 2", version, err)
+	if err != nil || version != 3 {
+		t.Fatalf("migration version = %d, error = %v; want 3", version, err)
 	}
 
 	var before time.Time
@@ -83,8 +83,8 @@ func TestProjectsMigrationPreservesDataOnRerun(t *testing.T) {
 		t.Errorf("rerun applied %d migrations, want 0", len(results))
 	}
 	version, err = rerun.GetDBVersion(ctx)
-	if err != nil || version != 2 {
-		t.Fatalf("rerun version = %d, error = %v; want 2", version, err)
+	if err != nil || version != 3 {
+		t.Fatalf("rerun version = %d, error = %v; want 3", version, err)
 	}
 	preserved := scanProject(t, db.QueryRowContext(ctx, `
 		SELECT id::text, name, slug, git_url, branch, app_port, health_path,
@@ -236,12 +236,12 @@ func TestConcurrentInitialMigrations(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	if applied != 2 {
-		t.Errorf("concurrent providers applied %d migrations in total, want 2", applied)
+	if applied != 3 {
+		t.Errorf("concurrent providers applied %d migrations in total, want 3", applied)
 	}
 	version, err := first.GetDBVersion(ctx)
-	if err != nil || version != 2 {
-		t.Errorf("migration version = %d, error = %v; want 2", version, err)
+	if err != nil || version != 3 {
+		t.Errorf("migration version = %d, error = %v; want 3", version, err)
 	}
 }
 

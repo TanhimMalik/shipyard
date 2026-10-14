@@ -47,7 +47,7 @@ func TestDeploymentMigrationUpgradesAndPreservesExistingData(t *testing.T) {
 			       created_at, updated_at FROM projects WHERE id = $1`, original.ID))
 	}
 
-	results, err = provider.Up(ctx)
+	results, err = provider.UpTo(ctx, 2)
 	if err != nil || len(results) != 1 {
 		t.Fatalf("upgrade from version 1: applied %d migrations, error = %v; want 1", len(results), err)
 	}
@@ -84,7 +84,7 @@ func TestDeploymentMigrationUpgradesAndPreservesExistingData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create rerun provider: %v", err)
 	}
-	results, err = rerun.Up(ctx)
+	results, err = rerun.UpTo(ctx, 2)
 	if err != nil || len(results) != 0 {
 		t.Fatalf("rerun version 2: applied %d migrations, error = %v; want 0", len(results), err)
 	}

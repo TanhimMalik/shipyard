@@ -139,7 +139,7 @@ func writeStoreError(w http.ResponseWriter, operation string, err error) {
 	case errors.Is(err, ErrNotFound):
 		httpapi.WriteError(w, http.StatusNotFound, "Deployment not found.")
 	case errors.Is(err, ErrAlreadyQueued):
-		httpapi.WriteError(w, http.StatusConflict, "This project already has a queued deployment.")
+		httpapi.WriteError(w, http.StatusConflict, "This project already has an unfinished deployment.")
 	default:
 		slog.Error("Deployment storage unavailable", "operation", operation, "error", database.ErrorLogValue(err))
 		httpapi.WriteError(w, http.StatusServiceUnavailable, "Deployment storage is unavailable. Try again later.")

@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"shipyard/apps/api/internal/database"
 	"shipyard/apps/api/internal/httpapi"
 )
 
@@ -140,7 +141,7 @@ func writeStoreError(w http.ResponseWriter, operation string, err error) {
 	case errors.Is(err, ErrAlreadyQueued):
 		httpapi.WriteError(w, http.StatusConflict, "This project already has a queued deployment.")
 	default:
-		slog.Error("Deployment storage unavailable", "operation", operation)
+		slog.Error("Deployment storage unavailable", "operation", operation, "error", database.ErrorLogValue(err))
 		httpapi.WriteError(w, http.StatusServiceUnavailable, "Deployment storage is unavailable. Try again later.")
 	}
 }

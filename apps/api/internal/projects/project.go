@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"shipyard/apps/api/internal/gitinput"
 )
 
 type Project struct {
@@ -69,10 +70,10 @@ func Validate(input CreateInput) (CreateInput, map[string]string) {
 	if problems["slug"] == "" && !slugPattern.MatchString(input.Slug) {
 		problems["slug"] = "Use lowercase letters and numbers, separated by single hyphens."
 	}
-	if problems["git_url"] == "" && !validGitURL(input.GitURL) {
-		problems["git_url"] = "Use an HTTPS repository URL without credentials, a query, or a fragment."
+	if problems["git_url"] == "" && !gitinput.ValidURL(input.GitURL) {
+		problems["git_url"] = "Use an HTTPS repository URL with a valid host, without credentials, a query, or a fragment."
 	}
-	if problems["branch"] == "" && !validBranch(input.Branch) {
+	if problems["branch"] == "" && !gitinput.ValidBranch(input.Branch) {
 		problems["branch"] = "Use a branch name, without a full ref or revision expression."
 	}
 	if input.AppPort < 1 || input.AppPort > 65535 {
@@ -85,45 +86,6 @@ func Validate(input CreateInput) (CreateInput, map[string]string) {
 		return input, nil
 	}
 	return input, problems
-}
-
-func validGitURL(value string) bool {
-	if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
-		return false
-	}
-	u, err := url.Parse(value)
-	if err != nil {
-		return false
-	}
-	if strings.HasSuffix(u.Host, ":") {
-		return false
-	}
-	if port := u.Port(); port != "" {
-		number, err := strconv.Atoi(port)
-		if err != nil || number < 1 || number > 65535 {
-			return false
-		}
-	}
-	return strings.EqualFold(u.Scheme, "https") && u.Hostname() != "" &&
-		u.Opaque == "" && u.User == nil && u.RawQuery == "" && !u.ForceQuery &&
-		!strings.Contains(value, "#") && strings.Trim(u.Path, "/") != ""
-}
-
-// Branches use Git's ref-name rules, with one-level names allowed. A later
-// checkout must fetch refs/heads/<name>, never resolve the input as a revision.
-func validBranch(value string) bool {
-	if value == "HEAD" || value == "@" || strings.HasPrefix(value, "refs/") ||
-		strings.HasPrefix(value, "-") || strings.HasSuffix(value, ".") ||
-		strings.Contains(value, "..") || strings.Contains(value, "@{") ||
-		strings.ContainsAny(value, " ~^:?*[\\") {
-		return false
-	}
-	for _, component := range strings.Split(value, "/") {
-		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
-			return false
-		}
-	}
-	return true
 }
 
 func validHealthPath(value string) bool {

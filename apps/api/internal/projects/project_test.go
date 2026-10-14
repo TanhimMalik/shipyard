@@ -73,6 +73,8 @@ func TestValidateRepositoryURLs(t *testing.T) {
 		"https://git.example.test/app?", "https://git.example.test/app#", "https://git.example.test/a\nb",
 		"https://git.example.test/a b", "https://git.example.test/a\u0085b",
 		"https://git.example.test:0/app", "https://git.example.test:65536/app", "https://git.example.test:/app",
+		"https://git_repo.example.com/app.git", "https://bücher.example/app.git",
+		"https://github.com./owner/repo.git", "https://example.123/app.git",
 	} {
 		input := validInput()
 		input.GitURL = value

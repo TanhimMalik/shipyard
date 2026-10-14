@@ -5,7 +5,8 @@ API and a Next.js UI with dark and light themes. The Overview checks whether
 the Go API is responding. Local project screens let you create a project, browse
 the directory, and view its saved settings. The API also supports editing and
 deleting configuration. Deployment attempts can be queued and inspected through
-the local API; source checkout, builds, and container startup come next.
+the local API. A source checkout module is tested separately; the executor,
+image builds, and container startup come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -97,6 +98,12 @@ letters and numbers with single hyphens. Repository URLs must use HTTPS without
 credentials, queries, or fragments. Branches must be bare branch names; health
 paths must start with `/` without queries, fragments, or traversal. All fields
 are required. This stores configuration; it does not fetch or build the source.
+Repository hosts use ASCII DNS labels (use punycode for international domains)
+or canonical IP addresses. Trailing host dots and legacy numeric IPv4 spellings
+are rejected. A saved URL does not imply source approval: checkout requires an
+exact match in the operator's approved list, including URL casing, port, and path.
+URLs are trimmed when saved; they are not otherwise rewritten. Approval is not
+checked when queueing yet because the executor configuration is not connected.
 
 Creation returns the saved project with its ID and timestamps (`201`). Invalid
 settings return field errors (`422`), and a duplicate slug returns `409`.
@@ -162,6 +169,37 @@ This milestone stores attempts only. There is no executor yet: queued records
 survive restarts, stay queued, and block another attempt until execution is added.
 There is no deployment button or frontend gateway for these endpoints yet.
 
+## Source checkout
+
+The Go source module fetches one branch into a private temporary workspace and
+returns its exact commit SHA and detached checkout. It requires Git 2.39 or newer
+on macOS or Linux, linked with libcurl 7.59 or newer; use a patched Git installation.
+The caller supplies an explicit list of approved repository URLs and closes the
+checkout when finished. Only an exact URL match is allowed. This module is not
+connected to queued attempts yet,
+so it does not change deployment status or persist the commit.
+The workspace root must have private permissions and belong to the service user.
+Place it beneath a stable parent controlled by that user, rather than an arbitrary
+shared directory. Filesystem permissions do not isolate processes sharing a UID.
+
+Fetches use HTTPS with certificate verification. Repository hosts must resolve
+only to public addresses, which are pinned for the fetch. Redirects, credentials,
+inherited Git configuration, hooks, and submodule fetching are disabled. Branches
+are fetched as `refs/heads/<name>`; tags and revision expressions cannot substitute
+for the requested branch. The default deadline is two minutes, covering resolution,
+fetch, and checkout. Cancellation stops Git and its transport helpers; failures
+remove partial workspaces. Successful workspaces remain until the caller closes
+them. An abrupt process or machine crash can leave workspaces behind; startup
+cleanup belongs with the executor.
+
+Source handling is for approved, controlled repositories. Shallow fetches still
+have no disk quota, and this is not isolation for hostile repositories. Submodule
+contents and Git LFS downloads are not included. Tracked symlinks remain symlinks;
+future build-context handling must keep them from exposing host files.
+Git command failures retain at most 4 KiB of stderr for private diagnostic logging;
+their public error text omits that output. Storage logs include failure categories
+and SQLSTATE codes when available, without raw connection or query details.
+
 ## Vercel
 
 Import this repository into Vercel with these settings:
@@ -198,7 +236,11 @@ The build does not require a running API. Run `pnpm format` to apply formatting.
 From `apps/api`, run `gofmt -l .`, `go vet ./...`, `go test ./...`,
 `go test -race ./...`, and `go build ./...`. Tests cover API configuration, health
 responses, routing, shutdown, project validation and HTTP behavior, and the
-migration CLI, deployment request handling, and history-preserving deletion.
+migration CLI, deployment request handling, history-preserving deletion, and
+source input and network policy.
+Ordinary unit tests use a stub Git executable and do not require an installed Git.
+The API builds on other operating systems, but source checkout returns an explicit
+unsupported-platform error there.
 
 Database tests are opt-in. From `apps/api`, run
 `SHIPYARD_TEST_DATABASE_URL="$SHIPYARD_DATABASE_URL" go test -tags=integration ./...`
@@ -208,3 +250,12 @@ schema constraints, concurrent migration commands, project persistence, duplicat
 slugs, partial and concurrent updates, deletion, pagination order, and canceled
 queries. Deployment tests check saved snapshots, concurrent queueing, persistence,
 project deletion races, and migration upgrades.
+
+With the supported Git installation and `git-http-backend` available, the
+integration suite also uses a local HTTPS Git server to check exact branch
+commits, detached checkouts, configuration isolation, and
+workspace cleanup. It does not need public-network access. To additionally fetch
+an approved public repository, set `SHIPYARD_TEST_GIT_URL` and optionally
+`SHIPYARD_TEST_GIT_BRANCH` (default `main`) when running the integration suite.
+Set `SHIPYARD_TEST_GIT_COMMIT` to assert a particular expected commit. Source
+integration tests require macOS or Linux and fail if their Git dependency is missing.

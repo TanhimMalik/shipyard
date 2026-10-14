@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"shipyard/apps/api/internal/database"
 	"shipyard/apps/api/internal/httpapi"
 )
 
@@ -204,7 +205,7 @@ func writeStoreError(w http.ResponseWriter, operation string, err error) {
 	case errors.Is(err, ErrSlugTaken):
 		httpapi.WriteError(w, http.StatusConflict, "A project with this slug already exists.")
 	default:
-		slog.Error("Project storage unavailable", "operation", operation)
+		slog.Error("Project storage unavailable", "operation", operation, "error", database.ErrorLogValue(err))
 		httpapi.WriteError(w, http.StatusServiceUnavailable, "Project storage is unavailable. Try again later.")
 	}
 }

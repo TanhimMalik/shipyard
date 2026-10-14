@@ -33,7 +33,8 @@ function ProjectDetailContent({ id }: { id: string }) {
         if (!controller.signal.aborted) {
           setState({
             status:
-              error instanceof ProjectRequestError && error.status === 404
+              error instanceof ProjectRequestError &&
+              (error.status === 400 || error.status === 404)
                 ? "not-found"
                 : "error",
           });

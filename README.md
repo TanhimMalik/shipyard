@@ -5,8 +5,8 @@ API and a Next.js UI with dark and light themes. The Overview checks whether
 the Go API is responding. Local project screens let you create a project, browse
 the directory, and view its saved settings. The API also supports editing and
 deleting configuration. Deployment attempts can be queued and inspected through
-the local API. Source checkout and Dockerfile image building are tested separately;
-background execution and container startup come next.
+the local API. Source checkout, image building, and container operations are tested
+separately; connecting them to background execution comes next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -246,6 +246,42 @@ Registry authentication, build secrets, custom Dockerfile paths, and multi-platf
 builds are not exposed. This module is not connected to queued attempts yet and
 does not start application containers or change deployment status.
 
+## Container runtime
+
+The Go runtime module creates, starts, inspects, stops, and removes containers
+through the Docker SDK. It accepts an immutable managed image ID and explicit
+project, deployment, and instance identities. Stable instance names make create
+retries idempotent; conflicting ownership is rejected. Mutations verify ownership
+and use the full container ID. Images stay owned by the caller.
+
+Startup requires Linux Docker Engine 28 or newer and an explicit Unix socket.
+The configured application TCP port gets a random port on `127.0.0.1` of the Docker
+host; other exposed ports stay unpublished. Docker documents a
+[loopback publishing issue in older engines](https://docs.docker.com/engine/network/port-publishing/).
+This is a local address, not a stable routed application URL. With Colima, the
+Docker host is its Linux VM.
+
+Containers get one CPU, 256 MiB memory without additional swap, a 64-process limit,
+all capabilities dropped, and no new privileges. Logs use the local driver with
+10 MiB rotation and three files. No host mounts or devices are supplied; images
+declaring volumes are rejected. Docker restart policies and inherited health
+checks are disabled. Image commands, environment, user, and writable filesystem
+are preserved. These controls are for approved applications, not hostile-code
+isolation; network access and filesystem disk usage remain unrestricted.
+
+Operations default to thirty seconds, with a two-minute maximum. Stop uses
+SIGTERM and a five-second grace period. Failed startup attempts remove only
+verified non-running containers; an ambiguous error can leave a running container
+for inspection. Removal never forces a running container to stop. Create warnings
+fail the operation rather than silently accepting unsupported limits. Private
+error diagnostics are bounded to 4 KiB.
+
+Returned state describes Docker's observed process, including exit code and OOM
+status. It does not establish HTTP readiness. This module is not connected to the
+queue, database lifecycle, routing, or frontend yet. Abrupt crashes and uncertain
+create responses can leave owned containers; retry and recovery belong with the
+worker.
+
 ## Vercel
 
 Import this repository into Vercel with these settings:
@@ -313,3 +349,11 @@ These tests use pull-free `FROM scratch` fixtures, verify local image availabili
 exercise real build failures and ignore rules, and remove their own image tags.
 They skip when the variable is unset and fail if the configured engine is
 unavailable or lacks BuildKit. Ordinary unit tests do not require Docker.
+
+The same Docker test setting enables runtime integration tests. They build a
+small static Go HTTP fixture, exercise create/start/inspect/stop/remove, and check
+actual cgroup v2 resource limits, loopback port mapping, ownership, and failed-start
+cleanup. These checks require cgroup v2 and HTTP access to the Docker host's
+loopback. For a VM, `SHIPYARD_TEST_DOCKER_HTTP_PROXY` can point to a temporary SSH
+SOCKS5 tunnel at `socks5://127.0.0.1:port`. It affects test HTTP requests only.
+Fixture binaries live in temporary test directories. Unit tests use a fake engine.

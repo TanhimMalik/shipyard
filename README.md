@@ -5,8 +5,8 @@ API and a Next.js UI with dark and light themes. The Overview checks whether
 the Go API is responding. Local project screens let you create a project, browse
 the directory, and view its saved settings. The API also supports editing and
 deleting configuration. Deployment attempts can be queued and inspected through
-the local API. A source checkout module is tested separately; the executor,
-image builds, and container startup come next.
+the local API. Source checkout and Dockerfile image building are tested separately;
+background execution and container startup come next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -209,10 +209,42 @@ cleanup belongs with the executor.
 Source handling is for approved, controlled repositories. Shallow fetches still
 have no disk quota, and this is not isolation for hostile repositories. Submodule
 contents and Git LFS downloads are not included. Tracked symlinks remain symlinks;
-future build-context handling must keep them from exposing host files.
+build contexts preserve them without reading their targets.
 Git command failures retain at most 4 KiB of stderr for private diagnostic logging;
 their public error text omits that output. Storage logs include failure categories
 and SQLSTATE codes when available, without raw connection or query details.
+
+## Image builds
+
+The Go build module sends a controlled checkout to Docker's embedded BuildKit
+through the Docker Go SDK. It requires a regular root `Dockerfile` and an explicit
+local Unix socket URL. It does not read Docker CLI credentials, environment
+configuration, or the active CLI context. No separate BuildKit service or registry
+is needed: the image is exported into that Docker engine's image store and
+inspected there before success is returned. Results contain a unique tag and
+Docker image ID, with labels identifying the attempt, commit, and build.
+
+Contexts honor `.dockerignore`, with `Dockerfile.dockerignore` taking precedence.
+Git metadata is always excluded. Symlinks are archived as links; their targets
+are not read. Dockerfiles and ignore files must be regular files. A private
+temporary archive is limited to 256 MiB and 10,000 visited entries; ignore files
+are limited to 1 MiB. The archive is removed after use. The caller keeps ownership
+of the checkout until the build finishes and of the image after success.
+
+The default five-minute deadline covers preparation, upload, build, and inspection;
+the maximum is thirty minutes. Build responses are capped at 16 MiB, and private
+failure diagnostics at 4 KiB. HTTP success alone does not mean a build succeeded:
+stream errors, incomplete output, and mismatched image identity or ownership fail
+the build. Failure requests cancellation and attempts to remove only that build's
+unique image tag within five more seconds. BuildKit cache can remain; daemon
+failures or abrupt process termination can leave resources for later cleanup.
+
+Docker access is privileged. Builds are for approved, controlled repositories;
+this is not isolation for hostile Dockerfiles. Build steps can access the network,
+and this module does not enforce CPU, memory, PID, or disk quotas on BuildKit.
+Registry authentication, build secrets, custom Dockerfile paths, and multi-platform
+builds are not exposed. This module is not connected to queued attempts yet and
+does not start application containers or change deployment status.
 
 ## Vercel
 
@@ -274,3 +306,10 @@ an approved public repository, set `SHIPYARD_TEST_GIT_URL` and optionally
 `SHIPYARD_TEST_GIT_BRANCH` (default `main`) when running the integration suite.
 Set `SHIPYARD_TEST_GIT_COMMIT` to assert a particular expected commit. Source
 integration tests require macOS or Linux and fail if their Git dependency is missing.
+
+To test image builds, set `SHIPYARD_TEST_DOCKER_HOST` to an explicit Unix socket
+URL for a disposable Linux Docker engine when running the integration suite.
+These tests use pull-free `FROM scratch` fixtures, verify local image availability,
+exercise real build failures and ignore rules, and remove their own image tags.
+They skip when the variable is unset and fail if the configured engine is
+unavailable or lacks BuildKit. Ordinary unit tests do not require Docker.

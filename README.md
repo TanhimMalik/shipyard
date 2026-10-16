@@ -5,8 +5,9 @@ API and a Next.js UI with dark and light themes. The Overview checks whether
 the Go API is responding. Local project screens let you create a project, browse
 the directory, and view its saved settings. The API also supports editing and
 deleting configuration. Deployment attempts can be queued and inspected through
-the local API. Source checkout, image building, and container operations are tested
-separately; connecting them to background execution comes next.
+the local API. An optional source worker fetches approved repositories in the
+background. Image building and container operations are tested separately;
+connecting those steps to the worker comes next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -176,10 +177,12 @@ write-once, with harmless retries of the same SHA. A source failure records a
 bounded public reason and finish time, clears ownership, and keeps any recorded
 commit. Failed attempts cannot be claimed again.
 
-There is no executor yet: the API only creates queued attempts. No background
-process calls the claim methods, fetches source, or changes deployment status.
-The storage methods are tested separately. Claims and their metadata survive
-restarts; interrupted-claim recovery will arrive with exclusive worker ownership.
+The source worker is disabled by default. When enabled, it claims queued attempts
+without blocking HTTP requests, checks out approved source, and records the exact
+commit. Successful attempts stay in `FETCHING_SOURCE` at this checkpoint until
+image execution is connected. The temporary checkout is removed; no image build,
+container startup, readiness check, or route activation is reported or performed.
+The unfinished-attempt slot stays occupied while waiting for that handoff.
 
 Internal transitions require the claim token and the expected stage. Building
 requires a recorded source commit. Starting records the build's unique image tag,
@@ -195,11 +198,36 @@ checks can begin only after a running candidate has been recorded; that stage
 does not mean the app is healthy or routed. Failures preserve build and instance
 history, clear the claim, and release the unfinished-attempt slot. Marking failure
 does not clean up Docker resources. Runtime records are internal for now; desired
-state, events, routing, and restart recovery remain separate work.
+state, events, routing, and container recovery remain separate work.
 
 There is no deployment button or frontend gateway for these endpoints yet. Run
 migrations before starting the updated API; execution migrations refuse to
 downgrade if that would discard source, build, or runtime data.
+
+## Source worker
+
+To opt in, set `SHIPYARD_EXECUTOR_ENABLED=true`, `SHIPYARD_WORKSPACE_ROOT` to an
+absolute private directory (0700), and `SHIPYARD_ALLOWED_REPOSITORIES` to a
+nonempty JSON array of exact approved HTTPS URLs, such as
+`["https://github.com/your-account/demo.git"]`, before starting the API. Approval
+is separate from saved project settings; unapproved attempts fail before network
+checkout. Source fetching keeps its two-minute default timeout.
+
+One worker polls every second and processes one checkout at a time. It holds a
+dedicated PostgreSQL session advisory lock, so a second enabled API process cannot
+recover or claim its work. This requires a direct PostgreSQL connection and a
+pool with at least two connections. A one-second heartbeat with a three-second
+deadline cancels source work if ownership is lost. Worker failures stop the API;
+shutdown cancels and joins the worker before releasing its session and closing
+the database pool.
+
+After acquiring ownership, startup marks interrupted `FETCHING_SOURCE` attempts
+failed, preserving any recorded commit. Queued attempts stay queued. Recovery
+does not automatically refetch a moving branch or resume a removed checkout.
+Build and container stages are refused during startup until their recovery is
+connected. Graceful shutdown leaves an active claim for the next startup to
+recover. Abrupt process crashes can leave private source directories; remove
+those only while the worker is stopped. Docker resource recovery is still pending.
 
 ## Source checkout
 
@@ -207,9 +235,9 @@ The Go source module fetches one branch into a private temporary workspace and
 returns its exact commit SHA and detached checkout. It requires Git 2.39 or newer
 on macOS or Linux, linked with libcurl 7.59 or newer; use a patched Git installation.
 The caller supplies an explicit list of approved repository URLs and closes the
-checkout when finished. Only an exact URL match is allowed. This module is not
-connected to queued attempts yet, so it does not change deployment status or
-persist the commit itself.
+checkout when finished. Only an exact URL match is allowed. The optional worker
+connects checkout to queued attempts and persists the commit; the source module
+itself does not change deployment records.
 The workspace root must have private permissions and belong to the service user.
 Place it beneath a stable parent controlled by that user, rather than an arbitrary
 shared directory. Filesystem permissions do not isolate processes sharing a UID.
@@ -375,3 +403,10 @@ cleanup. These checks require cgroup v2 and HTTP access to the Docker host's
 loopback. For a VM, `SHIPYARD_TEST_DOCKER_HTTP_PROXY` can point to a temporary SSH
 SOCKS5 tunnel at `socks5://127.0.0.1:port`. It affects test HTTP requests only.
 Fixture binaries live in temporary test directories. Unit tests use a fake engine.
+
+Executor integration tests use isolated PostgreSQL schemas and a blocked fetcher
+to verify responsive API requests, exclusive ownership, and restart recovery.
+Set `SHIPYARD_TEST_EXECUTOR_GIT_URL` to an explicitly approved public HTTPS repo to
+also test real checkout through a queued API request; the branch defaults to
+`main` and can be set with `SHIPYARD_TEST_EXECUTOR_GIT_BRANCH`. That optional test
+fetches source only and removes its checkout.

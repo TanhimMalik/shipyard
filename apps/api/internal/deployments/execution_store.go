@@ -13,11 +13,30 @@ import (
 )
 
 var (
-	ErrNoQueuedDeployments = errors.New("no queued deployments")
-	ErrInvalidTransition   = errors.New("deployment is not owned by this claim in the required state")
-	ErrInvalidExecution    = errors.New("invalid deployment execution metadata")
-	commitPattern          = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+	ErrNoQueuedDeployments      = errors.New("no queued deployments")
+	ErrNoInterruptedDeployments = errors.New("no interrupted deployments")
+	ErrInvalidTransition        = errors.New("deployment is not owned by this claim in the required state")
+	ErrInvalidExecution         = errors.New("invalid deployment execution metadata")
+	commitPattern               = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 )
+
+// NextInterrupted is only used after acquiring exclusive executor ownership.
+// QUEUED attempts have never started and remain eligible for normal claiming.
+func (s *PostgresStore) NextInterrupted(ctx context.Context) (Claim, error) {
+	var claim Claim
+	deployment, err := scanDeployment(s.pool.QueryRow(ctx, `
+		SELECT `+deploymentColumns+`, claim_token::text FROM deployments
+		WHERE status IN ('FETCHING_SOURCE', 'BUILDING', 'STARTING', 'HEALTH_CHECKING')
+		ORDER BY created_at, id LIMIT 1`), &claim.Token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Claim{}, ErrNoInterruptedDeployments
+	}
+	if err != nil {
+		return Claim{}, fmt.Errorf("read interrupted deployment: %w", err)
+	}
+	claim.Deployment = deployment
+	return claim, nil
+}
 
 // ClaimNext takes the oldest unlocked queued attempt. Claiming also keeps the
 // project's unfinished-attempt slot occupied until this attempt is terminal.

@@ -27,7 +27,8 @@ type PostgresStore struct {
 }
 
 const deploymentColumns = `id::text, project_id::text, git_url, branch, app_port, health_path,
-	status, commit_sha, failure_stage, failure_reason, started_at, finished_at, created_at, updated_at`
+	status, commit_sha, image_reference, image_id, instance_id::text,
+	failure_stage, failure_reason, started_at, finished_at, created_at, updated_at`
 
 func NewStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
@@ -113,6 +114,7 @@ func scanDeployment(row pgx.Row, extra ...any) (Deployment, error) {
 	var deployment Deployment
 	fields := []any{&deployment.ID, &deployment.ProjectID, &deployment.GitURL, &deployment.Branch,
 		&deployment.AppPort, &deployment.HealthPath, &deployment.Status, &deployment.CommitSHA,
+		&deployment.ImageReference, &deployment.ImageID, &deployment.InstanceID,
 		&deployment.FailureStage, &deployment.FailureReason, &deployment.StartedAt, &deployment.FinishedAt,
 		&deployment.CreatedAt, &deployment.UpdatedAt}
 	err := row.Scan(append(fields, extra...)...)

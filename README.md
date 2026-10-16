@@ -155,8 +155,9 @@ status cannot be supplied by the client; they come from the saved project.
 Each attempt snapshots the Git URL, requested branch, application port, and health
 path in one database operation. Later project edits leave that attempt unchanged.
 The branch is still a requested name when queued. One unfinished attempt is allowed
-per project, across `QUEUED` and `FETCHING_SOURCE`, including concurrent requests;
-another returns `409`. Failed attempts remain in history and allow a new attempt.
+per project, across `QUEUED`, `FETCHING_SOURCE`, `BUILDING`, `STARTING`, and
+`HEALTH_CHECKING`, including concurrent requests. Another returns `409`. Failed
+attempts remain in history and allow a new attempt.
 
 `GET /api/projects/{id}/deployments` returns `deployments` and `next_offset`, using
 the same limit and offset rules as the project directory. An existing project with
@@ -164,8 +165,9 @@ no attempts returns an empty list; a missing project returns `404`.
 `GET /api/deployments/{id}` returns one saved attempt. Reads and writes use the
 same local access checks and three-second database deadline as project endpoints.
 Storage failures return a sanitized, uncached `503`.
-Records include nullable `commit_sha`, `failure_stage`, `failure_reason`,
-`started_at`, and `finished_at`. Claim tokens are private and never returned.
+Records include nullable `commit_sha`, `image_reference`, `image_id`, `instance_id`,
+`failure_stage`, `failure_reason`, `started_at`, and `finished_at`. Claim tokens
+are private and never returned.
 
 Internal storage methods can claim the oldest available queued attempt, record
 its exact source commit, and mark a source failure. Claims use row locks and an
@@ -178,10 +180,26 @@ There is no executor yet: the API only creates queued attempts. No background
 process calls the claim methods, fetches source, or changes deployment status.
 The storage methods are tested separately. Claims and their metadata survive
 restarts; interrupted-claim recovery will arrive with exclusive worker ownership.
-Successful checkout handoff will arrive with the image build step, so there is
-no synthetic build or success status. There is no deployment button or frontend
-gateway for these endpoints yet. Run migrations before starting the updated API;
-downgrading the execution migration refuses to discard source or lifecycle data.
+
+Internal transitions require the claim token and the expected stage. Building
+requires a recorded source commit. Starting records the build's unique image tag,
+immutable image ID, and a generated runtime instance identity in one transaction,
+before Docker creation. Same-stage retries reuse this identity and cannot replace
+the image. The database keeps the project's unfinished-attempt slot occupied
+through readiness checks.
+
+Runtime records distinguish an unobserved instance intent from observed Docker
+state. Observations pin the first full container ID and retain process status,
+running flag, exit code, OOM flag, published port, and observation time. Readiness
+checks can begin only after a running candidate has been recorded; that stage
+does not mean the app is healthy or routed. Failures preserve build and instance
+history, clear the claim, and release the unfinished-attempt slot. Marking failure
+does not clean up Docker resources. Runtime records are internal for now; desired
+state, events, routing, and restart recovery remain separate work.
+
+There is no deployment button or frontend gateway for these endpoints yet. Run
+migrations before starting the updated API; execution migrations refuse to
+downgrade if that would discard source, build, or runtime data.
 
 ## Source checkout
 

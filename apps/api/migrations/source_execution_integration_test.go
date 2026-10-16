@@ -59,7 +59,7 @@ func TestSourceExecutionMigrationPreservesQueuedDataAndSupportsSafeDown(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	results, err = rerun.Up(ctx)
+	results, err = rerun.UpTo(ctx, 3)
 	if err != nil || len(results) != 0 {
 		t.Fatalf("rerun source migration: applied %d, error = %v; want 0", len(results), err)
 	}

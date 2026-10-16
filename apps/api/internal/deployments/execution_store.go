@@ -62,16 +62,26 @@ func (s *PostgresStore) RecordSourceCommit(ctx context.Context, claim Claim, com
 // FailSource persists a caller-supplied public reason, never a raw Git or storage
 // error. FAILED is terminal; retrying creates a new attempt with a new claim.
 func (s *PostgresStore) FailSource(ctx context.Context, claim Claim, reason string) (Deployment, error) {
-	if !validFailureReason(reason) {
+	return s.FailExecution(ctx, claim, StatusFetchingSource, reason)
+}
+
+// FailExecution only accepts a public reason and the exact current stage.
+// Cleanup is separate: a failed attempt may still own resources to inspect.
+func (s *PostgresStore) FailExecution(ctx context.Context, claim Claim, stage, reason string) (Deployment, error) {
+	if !validFailureReason(reason) || !executionStage(stage) {
 		return Deployment{}, ErrInvalidExecution
 	}
 	deployment, err := scanDeployment(s.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = 'FAILED', failure_stage = 'FETCHING_SOURCE', failure_reason = $3,
+		SET status = 'FAILED', failure_stage = $3, failure_reason = $4,
 		    finished_at = now(), updated_at = now(), claim_token = NULL
-		WHERE id = $1 AND claim_token = $2 AND status = 'FETCHING_SOURCE'
-		RETURNING `+deploymentColumns, claim.ID, claim.Token, reason))
-	return executionResult(deployment, err, "fail source checkout")
+		WHERE id = $1 AND claim_token = $2 AND status = $3
+		RETURNING `+deploymentColumns, claim.ID, claim.Token, stage, reason))
+	return executionResult(deployment, err, "fail deployment execution")
+}
+
+func executionStage(stage string) bool {
+	return stage == StatusFetchingSource || stage == StatusBuilding || stage == StatusStarting || stage == StatusHealthChecking
 }
 
 func executionResult(deployment Deployment, err error, operation string) (Deployment, error) {

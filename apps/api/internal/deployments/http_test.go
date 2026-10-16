@@ -481,7 +481,7 @@ func httpTestDeploymentResponse(t *testing.T, response *httptest.ResponseRecorde
 		gotFields = append(gotFields, field)
 	}
 	slices.Sort(gotFields)
-	wantFields := []string{"app_port", "branch", "commit_sha", "created_at", "failure_reason", "failure_stage", "finished_at", "git_url", "health_path", "id", "project_id", "started_at", "status", "updated_at"}
+	wantFields := []string{"app_port", "branch", "commit_sha", "created_at", "failure_reason", "failure_stage", "finished_at", "git_url", "health_path", "id", "image_id", "image_reference", "instance_id", "project_id", "started_at", "status", "updated_at"}
 	if !slices.Equal(gotFields, wantFields) {
 		t.Errorf("deployment JSON fields = %v, want %v", gotFields, wantFields)
 	}

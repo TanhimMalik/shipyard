@@ -17,10 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/moby/moby/client"
+	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 	"shipyard/apps/api/migrations"
 )
@@ -89,17 +93,21 @@ func TestAsyncSourceOwnershipAPIAndRestartRecovery(t *testing.T) {
 		t.Fatalf("restart did not preserve interrupted failure: %+v", failed)
 	}
 	next := executorTestQueue(t, api.URL, projectID)
-	checkpoint := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool { return d.CommitSHA != nil })
-	if checkpoint.Status != deployments.StatusFetchingSource || *checkpoint.CommitSHA != strings.Repeat("b", 40) || checkpoint.ImageID != nil || checkpoint.InstanceID != nil {
-		t.Fatalf("source checkpoint invented later stages: %+v", checkpoint)
+	checkpoint := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusStarting })
+	if checkpoint.CommitSHA == nil || *checkpoint.CommitSHA != strings.Repeat("b", 40) || checkpoint.ImageID == nil || checkpoint.InstanceID == nil {
+		t.Fatalf("build checkpoint was not saved: %+v", checkpoint)
+	}
+	instance, err := store.GetInstance(t.Context(), *checkpoint.InstanceID)
+	if err != nil || instance.ContainerID != nil || instance.ObservedAt != nil || instance.Running != nil {
+		t.Fatalf("planned instance invented Docker observations: %+v, %v", instance, err)
 	}
 	if err := stopReplacement(); err != nil {
 		t.Fatal(err)
 	}
 	stopRecovery := executorTestRun(t, executorTestWorker(pool, nil))
 	recovered := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed })
-	if recovered.CommitSHA == nil || *recovered.CommitSHA != strings.Repeat("b", 40) {
-		t.Fatalf("restart discarded the source checkpoint: %+v", recovered)
+	if recovered.CommitSHA == nil || *recovered.CommitSHA != strings.Repeat("b", 40) || recovered.ImageID == nil || *recovered.ImageID != *checkpoint.ImageID || recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusStarting {
+		t.Fatalf("restart discarded build history or failed the wrong stage: %+v", recovered)
 	}
 	if err := stopRecovery(); err != nil {
 		t.Fatal(err)
@@ -117,10 +125,17 @@ func TestExecutorFetchesApprovedPublicGitThroughQueuedAPI(t *testing.T) {
 	}
 	pool := executorTestDatabase(t)
 	root := filepath.Join(t.TempDir(), "workspace")
-	worker, err := New(Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: []string{repository}}, pool)
+	worker, err := New(Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: []string{repository}, DockerHost: "unix:///tmp/shipyard-source-test.sock"}, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = worker.Close() })
+	building := make(chan builds.Input, 1)
+	worker.builder = testBuilder{build: func(ctx context.Context, input builds.Input) (builds.Image, error) {
+		building <- input
+		<-ctx.Done()
+		return builds.Image{}, ctx.Err()
+	}}
 	stop := executorTestRun(t, worker)
 	store := deployments.NewStore(pool)
 	api := httptest.NewServer(deployments.NewHandler(store))
@@ -137,9 +152,20 @@ func TestExecutorFetchesApprovedPublicGitThroughQueuedAPI(t *testing.T) {
 		if saved.Status == deployments.StatusFailed {
 			t.Fatalf("real Git checkout failed: %+v", saved)
 		}
-		if saved.CommitSHA != nil {
-			if saved.Status != deployments.StatusFetchingSource || len(*saved.CommitSHA) != 40 && len(*saved.CommitSHA) != 64 {
+		if saved.Status == deployments.StatusBuilding {
+			if saved.CommitSHA == nil || len(*saved.CommitSHA) != 40 && len(*saved.CommitSHA) != 64 || saved.ImageID != nil || saved.InstanceID != nil {
 				t.Fatalf("invalid real source checkpoint: %+v", saved)
+			}
+			select {
+			case input := <-building:
+				if input.CommitSHA != *saved.CommitSHA || input.DeploymentID != saved.ID {
+					t.Fatalf("build did not receive fetched source identity: %+v", input)
+				}
+				if _, err := os.Stat(input.CheckoutPath); err != nil {
+					t.Fatalf("source workspace did not survive through build: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("builder did not receive the real checkout")
 			}
 			if err := stop(); err != nil {
 				t.Fatal(err)
@@ -155,8 +181,126 @@ func TestExecutorFetchesApprovedPublicGitThroughQueuedAPI(t *testing.T) {
 	t.Fatal("real source checkpoint was not recorded within 90 seconds")
 }
 
+func TestExecutorBuildsThroughQueuedAPIAndRecoversBeforeStartup(t *testing.T) {
+	host := os.Getenv("SHIPYARD_TEST_DOCKER_HOST")
+	if host == "" {
+		t.Skip("set SHIPYARD_TEST_DOCKER_HOST to an explicit disposable Linux Docker socket")
+	}
+	for _, broken := range []bool{false, true} {
+		name := "saved image and safe restart cleanup"
+		if broken {
+			name = "failed build keeps source history"
+		}
+		t.Run(name, func(t *testing.T) {
+			pool := executorTestDatabase(t)
+			store := deployments.NewStore(pool)
+			builder, err := builds.NewBuilder(builds.Config{DockerHost: host, Timeout: 30 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = builder.Close() })
+			inspector, err := runtime.NewManager(runtime.Config{DockerHost: host})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = inspector.Close() })
+			docker, err := client.New(client.WithHost(host), client.WithAPIVersionNegotiation())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = docker.Close() })
+			root, sha := t.TempDir(), strings.Repeat("d", 40)
+			for filename, content := range map[string]string{"Dockerfile": "FROM scratch\nCOPY payload /payload\n", "payload": "executor-build-fixture"} {
+				if broken && filename == "payload" {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(root, filename), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			worker := executorTestWorker(pool, fetchFunc(func(context.Context, string, string) (*source.Checkout, error) {
+				return &source.Checkout{Path: root, CommitSHA: sha}, nil
+			}))
+			worker.builder, worker.inspector = builder, inspector
+			stop := executorTestRun(t, worker)
+			api := httptest.NewServer(deployments.NewHandler(store))
+			t.Cleanup(api.Close)
+			queued := executorTestQueue(t, api.URL, executorTestProject(t, pool, "https://example.com/build-fixture.git", "main"))
+			input := builds.Input{DeploymentID: queued.ID, CommitSHA: sha, BuildID: queued.ID}
+			reference := workerTestImage(queued.ID).Reference
+			t.Cleanup(func() {
+				if err := stop(); err != nil {
+					t.Error(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := builder.Cleanup(ctx, input, ""); err != nil {
+					t.Errorf("clean exact executor fixture build: %v", err)
+				}
+			})
+			saved := executorTestWait(t, store, queued.ID, func(d deployments.Deployment) bool {
+				return d.Status == deployments.StatusStarting || d.Status == deployments.StatusFailed
+			}, 45*time.Second)
+			if saved.CommitSHA == nil || *saved.CommitSHA != sha {
+				t.Fatalf("build lost exact source history: %+v", saved)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if broken {
+				if saved.Status != deployments.StatusFailed || saved.FailureStage == nil || *saved.FailureStage != deployments.StatusBuilding || saved.FailureReason == nil || *saved.FailureReason != "Image build failed." || saved.ImageID != nil || saved.InstanceID != nil {
+					t.Fatalf("real build failure was not saved safely: %+v", saved)
+				}
+				if _, err := docker.ImageInspect(ctx, reference); !errdefs.IsNotFound(err) {
+					t.Fatalf("failed build left an image: %v", err)
+				}
+				return
+			}
+			if saved.Status != deployments.StatusStarting || saved.ImageReference == nil || *saved.ImageReference != reference || saved.ImageID == nil || saved.InstanceID == nil {
+				t.Fatalf("build result or instance intent missing: %+v", saved)
+			}
+			image, err := docker.ImageInspect(ctx, reference)
+			if err != nil || image.ID != *saved.ImageID || image.Config == nil || image.Config.Labels["io.shipyard.deployment_id"] != queued.ID || image.Config.Labels["io.shipyard.commit_sha"] != sha {
+				t.Fatalf("persisted image not present with correct ownership: %v", err)
+			}
+			instance, err := store.GetInstance(t.Context(), *saved.InstanceID)
+			if err != nil || instance.ContainerID != nil || instance.ObservedAt != nil || instance.Running != nil {
+				t.Fatalf("build worker invented Docker observations: %+v, %v", instance, err)
+			}
+			spec := runtime.Spec{ProjectID: saved.ProjectID, DeploymentID: saved.ID, InstanceID: *saved.InstanceID, ImageID: *saved.ImageID, CommitSHA: sha, AppPort: saved.AppPort}
+			if _, err := inspector.Inspect(ctx, spec); !errors.Is(err, runtime.ErrNotFound) {
+				t.Fatalf("build worker unexpectedly created a container: %v", err)
+			}
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+			replacement := executorTestWorker(pool, nil)
+			replacement.builder, replacement.inspector = builder, inspector
+			stopRecovery := executorTestRun(t, replacement)
+			recovered := executorTestWait(t, store, queued.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed })
+			if recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusStarting || recovered.ImageID == nil || *recovered.ImageID != *saved.ImageID || recovered.InstanceID == nil || *recovered.InstanceID != *saved.InstanceID {
+				t.Fatalf("restart lost failed startup history: %+v", recovered)
+			}
+			if err := stopRecovery(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := docker.ImageInspect(ctx, reference); !errdefs.IsNotFound(err) {
+				t.Fatalf("restart did not remove its exact image tag: %v", err)
+			}
+		})
+	}
+}
+
 func executorTestWorker(pool *pgxpool.Pool, fetcher fetcher) *Worker {
-	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, acquire: func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) }, pollInterval: 5 * time.Millisecond, checkInterval: 20 * time.Millisecond}
+	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher,
+		builder: testBuilder{
+			build: func(ctx context.Context, input builds.Input) (builds.Image, error) {
+				return workerTestImage(input.DeploymentID), nil
+			},
+			cleanup: func(context.Context, builds.Input, string) error { return nil },
+		}, inspector: inspectFunc(func(context.Context, runtime.Spec) (runtime.Instance, error) {
+			return runtime.Instance{}, runtime.ErrNotFound
+		}),
+		acquire: func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) }, pollInterval: 5 * time.Millisecond, checkInterval: 20 * time.Millisecond}
 }
 
 func executorTestRun(t *testing.T, w *Worker) func() error {
@@ -197,9 +341,13 @@ func executorTestQueue(t *testing.T, origin, projectID string) deployments.Deplo
 	return deployment
 }
 
-func executorTestWait(t *testing.T, store *deployments.PostgresStore, id string, ready func(deployments.Deployment) bool) deployments.Deployment {
+func executorTestWait(t *testing.T, store *deployments.PostgresStore, id string, ready func(deployments.Deployment) bool, timeout ...time.Duration) deployments.Deployment {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	wait := 5 * time.Second
+	if len(timeout) > 0 {
+		wait = timeout[0]
+	}
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		deployment, err := store.Get(ctx, id)

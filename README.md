@@ -5,9 +5,9 @@ API and a Next.js UI with dark and light themes. The Overview checks whether
 the Go API is responding. Local project screens let you create a project, browse
 the directory, and view its saved settings. The API also supports editing and
 deleting configuration. Deployment attempts can be queued and inspected through
-the local API. An optional source worker fetches approved repositories in the
-background. Image building and container operations are tested separately;
-connecting those steps to the worker comes next.
+the local API. An optional worker fetches approved repositories and builds their
+Dockerfiles in the background. It saves the image and a planned runtime instance;
+connecting container startup comes next.
 
 The planned hosting setup is a Next.js frontend on Vercel and a Go deployment
 engine on one Linux Docker host. Vercel configuration is included; everything
@@ -177,12 +177,12 @@ write-once, with harmless retries of the same SHA. A source failure records a
 bounded public reason and finish time, clears ownership, and keeps any recorded
 commit. Failed attempts cannot be claimed again.
 
-The source worker is disabled by default. When enabled, it claims queued attempts
-without blocking HTTP requests, checks out approved source, and records the exact
-commit. Successful attempts stay in `FETCHING_SOURCE` at this checkpoint until
-image execution is connected. The temporary checkout is removed; no image build,
-container startup, readiness check, or route activation is reported or performed.
-The unfinished-attempt slot stays occupied while waiting for that handoff.
+The worker is disabled by default. When enabled, it claims queued attempts without
+blocking HTTP requests, checks out approved source, records its exact commit, and
+builds the root Dockerfile through BuildKit. Success saves the image and an
+unobserved instance intent in `STARTING`. The checkout stays available throughout
+the build and is then removed. Container creation, readiness, and routing are not
+connected yet; the unfinished-attempt slot stays occupied at this handoff.
 
 Internal transitions require the claim token and the expected stage. Building
 requires a recorded source commit. Starting records the build's unique image tag,
@@ -204,30 +204,44 @@ There is no deployment button or frontend gateway for these endpoints yet. Run
 migrations before starting the updated API; execution migrations refuse to
 downgrade if that would discard source, build, or runtime data.
 
-## Source worker
+## Deployment worker
 
 To opt in, set `SHIPYARD_EXECUTOR_ENABLED=true`, `SHIPYARD_WORKSPACE_ROOT` to an
 absolute private directory (0700), and `SHIPYARD_ALLOWED_REPOSITORIES` to a
 nonempty JSON array of exact approved HTTPS URLs, such as
-`["https://github.com/your-account/demo.git"]`, before starting the API. Approval
-is separate from saved project settings; unapproved attempts fail before network
-checkout. Source fetching keeps its two-minute default timeout.
+`["https://github.com/your-account/demo.git"]`. Set `SHIPYARD_DOCKER_HOST` to the
+explicit Unix socket URL for the local Docker engine, such as
+`unix:///var/run/docker.sock`, before starting the API. Ambient `DOCKER_HOST` and
+the CLI context are ignored. Approval is separate from saved project settings;
+unapproved attempts fail before network
+checkout. Source fetching keeps its two-minute default timeout; builds use five
+minutes. Build failures save a fixed public reason and retain the source commit.
 
-One worker polls every second and processes one checkout at a time. It holds a
+One worker polls every second and processes one attempt at a time. It holds a
 dedicated PostgreSQL session advisory lock, so a second enabled API process cannot
 recover or claim its work. This requires a direct PostgreSQL connection and a
 pool with at least two connections. A one-second heartbeat with a three-second
-deadline cancels source work if ownership is lost. Worker failures stop the API;
-shutdown cancels and joins the worker before releasing its session and closing
+deadline cancels source and build work if ownership is lost. Worker failures stop
+the API; shutdown cancels and joins the worker before releasing its session and closing
 the database pool.
 
-After acquiring ownership, startup marks interrupted `FETCHING_SOURCE` attempts
-failed, preserving any recorded commit. Queued attempts stay queued. Recovery
-does not automatically refetch a moving branch or resume a removed checkout.
-Build and container stages are refused during startup until their recovery is
-connected. Graceful shutdown leaves an active claim for the next startup to
-recover. Abrupt process crashes can leave private source directories; remove
-those only while the worker is stopped. Docker resource recovery is still pending.
+After acquiring ownership, startup recovers interrupted source/build attempts.
+Each worker build uses its persisted deployment UUID as a stable build identity,
+so recovery can cancel that exact job and verify/remove its exact image tag.
+An interrupted `STARTING` attempt is cleaned only when its linked instance has no
+stored Docker observation and inspection confirms that no container exists.
+Ownership mismatches, cleanup uncertainty, observed containers, and later stages
+stop startup for inspection. Queued attempts stay queued; cleaned interrupted
+attempts fail with their metadata preserved. Uncertain database writes halt the
+worker and retain the image for recovery rather than guessing whether it was saved.
+
+Recovery does not refetch moving branches or resume removed checkouts. Graceful
+shutdown leaves active claims for the next startup. Abrupt crashes can leave
+private source directories; remove those only while the worker is stopped.
+Docker build cancellation does not wait for every daemon-side action to finish:
+a very late exported image can survive the bounded cleanup. Its stable identity
+remains derivable from deployment history. Build cache is retained; container
+recovery is still pending.
 
 ## Source checkout
 
@@ -269,6 +283,9 @@ configuration, or the active CLI context. No separate BuildKit service or regist
 is needed: the image is exported into that Docker engine's image store and
 inspected there before success is returned. Results contain a unique tag and
 Docker image ID, with labels identifying the attempt, commit, and build.
+Independent builds use fresh identities by default. The worker supplies its
+deployment UUID as a stable identity; an existing reserved tag is rejected before
+building, and retrying requires a new deployment attempt.
 
 Contexts honor `.dockerignore`, with `Dockerfile.dockerignore` taking precedence.
 Git metadata is always excluded. Symlinks are archived as links; their targets
@@ -289,8 +306,9 @@ Docker access is privileged. Builds are for approved, controlled repositories;
 this is not isolation for hostile Dockerfiles. Build steps can access the network,
 and this module does not enforce CPU, memory, PID, or disk quotas on BuildKit.
 Registry authentication, build secrets, custom Dockerfile paths, and multi-platform
-builds are not exposed. This module is not connected to queued attempts yet and
-does not start application containers or change deployment status.
+builds are not exposed. The optional worker connects this module to queued attempts
+and persists the returned image; the build module itself does not start containers
+or change deployment records.
 
 ## Container runtime
 
@@ -404,9 +422,13 @@ loopback. For a VM, `SHIPYARD_TEST_DOCKER_HTTP_PROXY` can point to a temporary S
 SOCKS5 tunnel at `socks5://127.0.0.1:port`. It affects test HTTP requests only.
 Fixture binaries live in temporary test directories. Unit tests use a fake engine.
 
-Executor integration tests use isolated PostgreSQL schemas and a blocked fetcher
-to verify responsive API requests, exclusive ownership, and restart recovery.
+Executor integration tests use isolated PostgreSQL schemas and blocked source or
+build operations to verify responsive API requests, exclusive ownership, and
+restart recovery. With `SHIPYARD_TEST_DOCKER_HOST`, controlled scratch fixtures
+exercise real queued builds, saved images, build failures, and guarded cleanup.
 Set `SHIPYARD_TEST_EXECUTOR_GIT_URL` to an explicitly approved public HTTPS repo to
 also test real checkout through a queued API request; the branch defaults to
 `main` and can be set with `SHIPYARD_TEST_EXECUTOR_GIT_BRANCH`. That optional test
-fetches source only and removes its checkout.
+blocks a fake builder to verify that the real checkout remains available during
+building and is removed on cancellation; it does not require a Dockerfile or run
+that repository's build.

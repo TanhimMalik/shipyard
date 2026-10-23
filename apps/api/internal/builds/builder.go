@@ -2,8 +2,6 @@ package builds
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +9,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -30,6 +27,9 @@ type Input struct {
 	CheckoutPath string
 	DeploymentID string
 	CommitSHA    string
+	// BuildID is an optional stable UUID for one attempt. An existing image tag
+	// is rejected; retrying a deployment requires a new attempt identity.
+	BuildID string
 }
 
 type Image struct {
@@ -87,18 +87,16 @@ var (
 // Build consumes a controlled source checkout. The caller owns that checkout
 // until Build returns and owns the resulting image after a successful return.
 func (b *Builder) Build(ctx context.Context, input Input) (result Image, resultErr error) {
-	if !deploymentIDPattern.MatchString(input.DeploymentID) || !commitPattern.MatchString(input.CommitSHA) || !filepath.IsAbs(input.CheckoutPath) {
+	if !filepath.IsAbs(input.CheckoutPath) {
 		return Image{}, ErrInvalidInput
+	}
+	identity, err := identifyBuild(input, true)
+	if err != nil {
+		return Image{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return Image{}, errors.New("could not generate build identity")
-	}
-	buildID := "shipyard-" + hex.EncodeToString(nonce[:])
-	deploymentID := strings.ToLower(input.DeploymentID)
-	reference := "shipyard/deployments:" + deploymentID + "-" + hex.EncodeToString(nonce[:])
+	buildID, reference := identity.id, identity.reference
 	started := false
 	defer func() {
 		if resultErr == nil {
@@ -112,27 +110,33 @@ func (b *Builder) Build(ctx context.Context, input Input) (result Image, resultE
 		if started {
 			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
-			_, cancelErr := b.docker.BuildCancel(cleanup, buildID, client.BuildCancelOptions{})
-			_, removeErr := b.docker.ImageRemove(cleanup, reference, client.ImageRemoveOptions{PruneChildren: false})
-			for _, err := range []error{cancelErr, removeErr} {
-				if err != nil && !errdefs.IsNotFound(err) {
-					resultErr = errors.Join(resultErr, fmt.Errorf("build cleanup: %w", err))
+			if input.BuildID != "" {
+				resultErr = errors.Join(resultErr, b.Cleanup(cleanup, input, ""))
+			} else {
+				_, cancelErr := b.docker.BuildCancel(cleanup, buildID, client.BuildCancelOptions{})
+				_, removeErr := b.docker.ImageRemove(cleanup, reference, client.ImageRemoveOptions{PruneChildren: false})
+				for _, err := range []error{cancelErr, removeErr} {
+					if err != nil && !errdefs.IsNotFound(err) {
+						resultErr = errors.Join(resultErr, fmt.Errorf("build cleanup: %w", err))
+					}
 				}
 			}
 		}
 		resultErr = &BuildError{cause: resultErr}
 	}()
+	if input.BuildID != "" {
+		if _, err := b.docker.ImageInspect(ctx, reference); err == nil {
+			return Image{}, errors.New("stable build identity already has an image")
+		} else if !errdefs.IsNotFound(err) {
+			return Image{}, err
+		}
+	}
 	archive, err := prepareContext(ctx, input.CheckoutPath)
 	if err != nil {
 		return Image{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, archive.Close()) }()
-	labels := map[string]string{
-		"io.shipyard.managed":       "true",
-		"io.shipyard.deployment_id": deploymentID,
-		"io.shipyard.commit_sha":    input.CommitSHA,
-		"io.shipyard.build_id":      buildID,
-	}
+	labels := identity.labels()
 	started = true
 	response, err := b.docker.ImageBuild(ctx, archive, client.ImageBuildOptions{
 		Version: build.BuilderBuildKit, Dockerfile: "Dockerfile", Tags: []string{reference},
@@ -168,9 +172,17 @@ func (b *Builder) Build(ctx context.Context, input Input) (result Image, resultE
 
 // BuildError keeps daemon/build diagnostics private and bounded. Its public
 // error text is safe to include in a higher-level failure response.
-type BuildError struct{ cause error }
+type BuildError struct {
+	cause   error
+	message string
+}
 
-func (e *BuildError) Error() string { return "image build failed" }
+func (e *BuildError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return "image build failed"
+}
 func (e *BuildError) Unwrap() error { return e.cause }
 func (e *BuildError) LogValue() slog.Value {
 	detail := e.cause.Error()

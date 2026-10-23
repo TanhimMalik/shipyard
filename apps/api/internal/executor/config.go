@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"path/filepath"
 
 	"shipyard/apps/api/internal/gitinput"
@@ -12,6 +13,7 @@ type Config struct {
 	Enabled             bool
 	WorkspaceRoot       string
 	AllowedRepositories []string
+	DockerHost          string
 }
 
 func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
@@ -36,5 +38,10 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, errors.New("SHIPYARD_ALLOWED_REPOSITORIES contains an invalid repository URL")
 		}
 	}
-	return Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: repositories}, nil
+	host, _ := lookup("SHIPYARD_DOCKER_HOST")
+	u, err := url.Parse(host)
+	if err != nil || u.Scheme != "unix" || u.Host != "" || u.User != nil || !filepath.IsAbs(u.Path) || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return Config{}, errors.New("SHIPYARD_DOCKER_HOST must be an explicit absolute Unix socket URL")
+	}
+	return Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: repositories, DockerHost: host}, nil
 }

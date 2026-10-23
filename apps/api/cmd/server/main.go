@@ -47,6 +47,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("configure executor: %w", err)
 		}
+		defer worker.Close()
 	}
 
 	listener, err := net.Listen("tcp", config.ListenAddr)

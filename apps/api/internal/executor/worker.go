@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
 
@@ -16,7 +18,19 @@ type store interface {
 	ClaimNext(context.Context) (deployments.Claim, error)
 	NextInterrupted(context.Context) (deployments.Claim, error)
 	RecordSourceCommit(context.Context, deployments.Claim, string) (deployments.Deployment, error)
+	BeginBuild(context.Context, deployments.Claim) (deployments.Deployment, error)
+	BeginStart(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
+	GetInstance(context.Context, string) (deployments.RuntimeInstance, error)
 	FailExecution(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
+}
+
+type builder interface {
+	Build(context.Context, builds.Input) (builds.Image, error)
+	Cleanup(context.Context, builds.Input, string) error
+}
+
+type inspector interface {
+	Inspect(context.Context, runtime.Spec) (runtime.Instance, error)
 }
 
 type fetcher interface {
@@ -26,6 +40,9 @@ type fetcher interface {
 type Worker struct {
 	store         store
 	fetcher       fetcher
+	builder       builder
+	inspector     inspector
+	close         func() error
 	acquire       func(context.Context) (lease, error)
 	pollInterval  time.Duration
 	checkInterval time.Duration
@@ -39,9 +56,26 @@ func New(config Config, pool *pgxpool.Pool) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher,
+	imageBuilder, err := builds.NewBuilder(builds.Config{DockerHost: config.DockerHost})
+	if err != nil {
+		return nil, err
+	}
+	runtimeInspector, err := runtime.NewManager(runtime.Config{DockerHost: config.DockerHost})
+	if err != nil {
+		_ = imageBuilder.Close()
+		return nil, err
+	}
+	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, inspector: runtimeInspector,
+		close:        func() error { return errors.Join(imageBuilder.Close(), runtimeInspector.Close()) },
 		acquire:      func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) },
 		pollInterval: time.Second, checkInterval: time.Second}, nil
+}
+
+func (w *Worker) Close() error {
+	if w.close != nil {
+		return w.close()
+	}
+	return nil
 }
 
 func (w *Worker) Run(parent context.Context) (resultErr error) {
@@ -130,11 +164,11 @@ func (w *Worker) recover(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read interrupted attempt: %w", err)
 		}
-		if claim.Status != deployments.StatusFetchingSource {
-			return errors.New("source executor cannot recover build or container-stage attempts")
+		if err := w.cleanInterrupted(ctx, claim); err != nil {
+			return err
 		}
 		writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		_, err = w.store.FailExecution(writeCtx, claim, claim.Status, "Deployment was interrupted during source preparation.")
+		_, err = w.store.FailExecution(writeCtx, claim, claim.Status, "Deployment was interrupted before container startup.")
 		cancel()
 		if errors.Is(err, deployments.ErrInvalidTransition) {
 			continue
@@ -145,8 +179,8 @@ func (w *Worker) recover(ctx context.Context) error {
 	}
 }
 
-// execute records the source checkpoint. The attempt stays in FETCHING_SOURCE
-// until the executor can actually begin building its image.
+// execute builds from the exact checkout and records an instance intent.
+// Container creation is a separate stage and is not performed here.
 func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultErr error) {
 	checkout, err := w.fetcher.Fetch(ctx, claim.GitURL, claim.Branch)
 	if err != nil {
@@ -172,6 +206,38 @@ func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultEr
 	stop()
 	if err != nil {
 		return fmt.Errorf("record fetched source: %w", err)
+	}
+	writeCtx, stop = context.WithTimeout(ctx, 3*time.Second)
+	_, err = w.store.BeginBuild(writeCtx, claim)
+	stop()
+	if err != nil {
+		return fmt.Errorf("begin image build: %w", err)
+	}
+	input := builds.Input{CheckoutPath: checkout.Path, DeploymentID: claim.ID, CommitSHA: checkout.CommitSHA, BuildID: claim.ID}
+	image, err := w.builder.Build(ctx, input)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Error("Image build failed", "deployment_id", claim.ID, "error", err)
+		// Keep the claim unfinished if cancellation or cleanup is uncertain.
+		if err := w.builder.Cleanup(ctx, input, ""); err != nil {
+			return fmt.Errorf("clean failed build: %w", err)
+		}
+		reason := "Image build failed."
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "Image build timed out."
+		}
+		writeCtx, stop = context.WithTimeout(ctx, 3*time.Second)
+		defer stop()
+		_, err = w.store.FailExecution(writeCtx, claim, deployments.StatusBuilding, reason)
+		return err
+	}
+	writeCtx, stop = context.WithTimeout(ctx, 3*time.Second)
+	defer stop()
+	_, err = w.store.BeginStart(writeCtx, claim, image.Reference, image.ID)
+	if err != nil {
+		return fmt.Errorf("record built image: %w", err)
 	}
 	return nil
 }

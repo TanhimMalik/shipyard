@@ -2,7 +2,6 @@ package projects
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"shipyard/apps/api/internal/gitinput"
+	"shipyard/apps/api/internal/health"
 )
 
 type Project struct {
@@ -79,34 +79,11 @@ func Validate(input CreateInput) (CreateInput, map[string]string) {
 	if input.AppPort < 1 || input.AppPort > 65535 {
 		problems["app_port"] = "Must be between 1 and 65535."
 	}
-	if problems["health_path"] == "" && !validHealthPath(input.HealthPath) {
+	if problems["health_path"] == "" && !health.ValidPath(input.HealthPath) {
 		problems["health_path"] = "Use a path beginning with /, without a query, fragment, or path traversal."
 	}
 	if len(problems) == 0 {
 		return input, nil
 	}
 	return input, problems
-}
-
-func validHealthPath(value string) bool {
-	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") ||
-		strings.ContainsAny(value, "?#\\") ||
-		strings.IndexFunc(value, unicode.IsSpace) >= 0 {
-		return false
-	}
-	u, err := url.ParseRequestURI(value)
-	if err != nil || u.IsAbs() || u.Host != "" || u.User != nil || u.Opaque != "" ||
-		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || !strings.HasPrefix(u.Path, "/") ||
-		strings.HasPrefix(u.Path, "//") || strings.ContainsRune(u.Path, '\\') ||
-		strings.IndexFunc(u.Path, unicode.IsControl) >= 0 || strings.Count(u.Path, "/") != strings.Count(value, "/") {
-		return false
-	}
-	// Reject encoded separators and decoded dot-segments instead of normalizing
-	// them into a different endpoint. Benign escapes remain unchanged.
-	for _, component := range strings.Split(u.Path, "/") {
-		if component == "." || component == ".." {
-			return false
-		}
-	}
-	return true
 }

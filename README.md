@@ -6,9 +6,9 @@ Linux host.
 
 It's still in development. Project screens and the local API work. The optional
 worker can fetch approved repositories, build their Dockerfiles, start containers,
-and save the observed Docker state. Readiness checks, routing, deployment controls
-in the UI, and remote admin access come next. A running container stays `STARTING`
-until readiness is implemented.
+and save the observed Docker state. HTTP readiness probes are implemented separately;
+worker integration, routing, UI deployment controls, and remote admin access come
+next. Deployments currently stop at `STARTING`.
 
 ## Run locally
 
@@ -65,6 +65,10 @@ Containers publish only the app port on the Docker host's loopback address and
 run with CPU, memory, process, and capability limits. Docker access is privileged;
 this is for approved, controlled repositories, not hostile code.
 
+Readiness probes use the Docker host's loopback port and configured path. They
+accept HTTP 2xx, retry for up to 30 seconds by default, and reject redirects.
+They do not yet advance deployment state or activate routes.
+
 Startup failures clean up verified owned resources before recording failure.
 Uncertain Docker or database results preserve the unfinished attempt for recovery.
 On restart, the worker cleans interrupted source, build, and startup attempts;
@@ -94,7 +98,7 @@ Run `gofmt -l .` to check Go formatting.
 Integration tests use `go test -race -tags=integration ./...` with
 `SHIPYARD_TEST_DATABASE_URL` pointing to local PostgreSQL. They create isolated
 schemas. Set `SHIPYARD_TEST_DOCKER_HOST` to a disposable Linux engine to include
-build and runtime checks. Runtime HTTP checks need access to that host's loopback;
+build, runtime, and readiness checks. HTTP checks need access to that host's loopback;
 `SHIPYARD_TEST_DOCKER_HTTP_PROXY` accepts a SOCKS5 URL for VM setups. Set
 `SHIPYARD_TEST_EXECUTOR_GIT_URL` to an approved public repository to include real
 worker checkout.

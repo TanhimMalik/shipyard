@@ -34,6 +34,7 @@ type Spec struct {
 	ProjectID    string
 	DeploymentID string
 	InstanceID   string
+	ContainerID  string
 	ImageID      string
 	CommitSHA    string
 	AppPort      int
@@ -94,6 +95,7 @@ func (m *Manager) Close() error {
 
 // Create uses a stable instance name so an uncertain response can be retried
 // without creating a second container. It never pulls an image or starts it.
+// A supplied ContainerID only permits adoption of that existing container.
 func (m *Manager) Create(ctx context.Context, spec Spec) (instance Instance, resultErr error) {
 	spec, err := normalizeSpec(spec)
 	if err != nil {
@@ -113,6 +115,16 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (instance Instance, res
 		image.Config.Labels["io.shipyard.managed"] != "true" || image.Config.Labels["io.shipyard.deployment_id"] != spec.DeploymentID ||
 		image.Config.Labels["io.shipyard.commit_sha"] != spec.CommitSHA || image.Config.Labels["io.shipyard.build_id"] == "" {
 		return Instance{}, ErrUnsupportedImage
+	}
+	if spec.ContainerID != "" {
+		found, err := m.inspectOwned(ctx, spec, containerName(spec))
+		if err != nil {
+			return Instance{}, err
+		}
+		if err := checkPolicy(spec, found); err != nil {
+			return Instance{}, err
+		}
+		return observedInstance(spec, found)
 	}
 	created, err := m.docker.ContainerCreate(ctx, createOptions(spec))
 	if errdefs.IsConflict(err) {
@@ -271,6 +283,7 @@ func (m *Manager) inspectOwned(ctx context.Context, spec Spec, id string) (conta
 	}
 	found := response.Container
 	if !containerIDPattern.MatchString(found.ID) || containerIDPattern.MatchString(id) && found.ID != id ||
+		spec.ContainerID != "" && found.ID != spec.ContainerID ||
 		found.Name != "/"+containerName(spec) || found.Image != spec.ImageID || found.Config == nil || found.State == nil {
 		return container.InspectResponse{}, ErrNotOwned
 	}

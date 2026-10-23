@@ -33,10 +33,58 @@ func (b testBuilder) Cleanup(ctx context.Context, input builds.Input, expectedID
 	return b.cleanup(ctx, input, expectedID)
 }
 
-type inspectFunc func(context.Context, runtime.Spec) (runtime.Instance, error)
+type testRuntime struct {
+	create  func(context.Context, runtime.Spec) (runtime.Instance, error)
+	start   func(context.Context, runtime.Spec) (runtime.Instance, error)
+	inspect func(context.Context, runtime.Spec) (runtime.Instance, error)
+	stop    func(context.Context, runtime.Spec) (runtime.Instance, error)
+	remove  func(context.Context, runtime.Spec) error
+}
 
-func (f inspectFunc) Inspect(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
-	return f(ctx, spec)
+func (r testRuntime) Create(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	if r.create != nil {
+		return r.create(ctx, spec)
+	}
+	return workerTestContainer(spec, false), nil
+}
+func (r testRuntime) Start(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	if r.start != nil {
+		return r.start(ctx, spec)
+	}
+	return workerTestContainer(spec, true), nil
+}
+func (r testRuntime) Inspect(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	if r.inspect != nil {
+		return r.inspect(ctx, spec)
+	}
+	return runtime.Instance{}, runtime.ErrNotFound
+}
+func (r testRuntime) Stop(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	if r.stop != nil {
+		return r.stop(ctx, spec)
+	}
+	got := workerTestContainer(spec, false)
+	got.Status = "exited"
+	return got, nil
+}
+func (r testRuntime) Remove(ctx context.Context, spec runtime.Spec) error {
+	if r.remove != nil {
+		return r.remove(ctx, spec)
+	}
+	return nil
+}
+
+func workerTestContainer(spec runtime.Spec, running bool) runtime.Instance {
+	id := spec.ContainerID
+	if id == "" {
+		id = strings.Repeat("c", 64)
+	}
+	got := runtime.Instance{ID: id, Name: "shipyard-" + spec.InstanceID, ImageID: spec.ImageID, Status: "created", Running: running}
+	if running {
+		got.Status = "running"
+		got.HostPort = 32123
+	}
+	return got
 }
 
 type testStore struct {
@@ -46,6 +94,7 @@ type testStore struct {
 	beginBuild  func(context.Context, deployments.Claim) (deployments.Deployment, error)
 	beginStart  func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
 	instance    func(context.Context, string) (deployments.RuntimeInstance, error)
+	observe     func(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	fail        func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
 }
 
@@ -72,6 +121,12 @@ func (s testStore) BeginStart(ctx context.Context, claim deployments.Claim, refe
 }
 func (s testStore) GetInstance(ctx context.Context, id string) (deployments.RuntimeInstance, error) {
 	return s.instance(ctx, id)
+}
+func (s testStore) RecordInstance(ctx context.Context, claim deployments.Claim, id string, observed deployments.Observation) (deployments.RuntimeInstance, error) {
+	if s.observe != nil {
+		return s.observe(ctx, claim, id, observed)
+	}
+	return deployments.RuntimeInstance{ID: id, DeploymentID: claim.ID, ContainerID: &observed.ContainerID, ObservedStatus: &observed.Status, Running: &observed.Running, ExitCode: &observed.ExitCode, OOMKilled: &observed.OOMKilled}, nil
 }
 func (s testStore) FailExecution(ctx context.Context, claim deployments.Claim, stage, reason string) (deployments.Deployment, error) {
 	return s.fail(ctx, claim, stage, reason)
@@ -103,6 +158,13 @@ func workerTestImage(id string) builds.Image {
 	return builds.Image{Reference: "shipyard/deployments:" + id + "-" + strings.ReplaceAll(id, "-", ""), ID: "sha256:" + strings.Repeat("b", 64)}
 }
 
+func workerTestStarting(claim deployments.Claim, sha string) deployments.Deployment {
+	got := claim.Deployment
+	image, instanceID := workerTestImage(claim.ID), "00000000-0000-4000-8000-000000000063"
+	got.Status, got.CommitSHA, got.ImageReference, got.ImageID, got.InstanceID = deployments.StatusStarting, &sha, &image.Reference, &image.ID, &instanceID
+	return got
+}
+
 func workerTestWrite(t *testing.T, ctx context.Context, got, want deployments.Claim) {
 	t.Helper()
 	deadline, ok := ctx.Deadline()
@@ -123,9 +185,12 @@ func TestBuildPipelineUsesSnapshotAndStopsOnStorageUncertainty(t *testing.T) {
 				if name == failedWrite {
 					return deployments.Deployment{}, storageError
 				}
+				if name == "begin start" {
+					return workerTestStarting(claim, sha), nil
+				}
 				return claim.Deployment, nil
 			}
-			w := &Worker{fetcher: fetchFunc(func(ctx context.Context, repository, branch string) (*source.Checkout, error) {
+			w := &Worker{runtime: testRuntime{}, fetcher: fetchFunc(func(ctx context.Context, repository, branch string) (*source.Checkout, error) {
 				calls = append(calls, "fetch")
 				if repository != claim.GitURL || branch != claim.Branch {
 					t.Fatal("did not use queued source snapshot")
@@ -338,13 +403,13 @@ func TestRecoveryCleansOnlySafeInterruptedStages(t *testing.T) {
 				cleaned = true
 				return nil
 			}},
-				inspector: inspectFunc(func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+				runtime: testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
 					if spec.DeploymentID != claim.ID || spec.ProjectID != claim.ProjectID || spec.InstanceID != instanceID || spec.ImageID != image.ID || spec.CommitSHA != sha || spec.AppPort != claim.AppPort {
 						t.Fatalf("inspection identity: %+v", spec)
 					}
 					inspected = true
 					return runtime.Instance{}, runtime.ErrNotFound
-				}),
+				}},
 			}
 			if err := w.recover(t.Context()); err != nil || !failed {
 				t.Fatalf("failed=%t error=%v", failed, err)
@@ -354,7 +419,7 @@ func TestRecoveryCleansOnlySafeInterruptedStages(t *testing.T) {
 }
 
 func TestRecoveryUncertaintyDoesNotMutateOrClaimWork(t *testing.T) {
-	for _, problem := range []string{"later stage", "missing SHA", "missing image", "missing instance", "instance read", "different deployment", "observed container", "existing container", "foreign container", "inspect error", "cleanup"} {
+	for _, problem := range []string{"later stage", "missing SHA", "missing image", "missing instance", "instance read", "different deployment", "foreign container", "inspect error", "cleanup"} {
 		t.Run(problem, func(t *testing.T) {
 			claim, sha, instanceID := workerTestClaim(), strings.Repeat("a", 40), "00000000-0000-4000-8000-000000000063"
 			image := workerTestImage(claim.ID)
@@ -372,9 +437,6 @@ func TestRecoveryUncertaintyDoesNotMutateOrClaimWork(t *testing.T) {
 				claim.InstanceID = nil
 			case "different deployment":
 				instance.DeploymentID = "another-attempt"
-			case "observed container":
-				containerID := strings.Repeat("c", 64)
-				instance.ContainerID = &containerID
 			}
 			w := &Worker{pollInterval: time.Millisecond, checkInterval: time.Millisecond, store: testStore{
 				interrupted: func(context.Context) (deployments.Claim, error) { return claim, nil },
@@ -398,17 +460,15 @@ func TestRecoveryUncertaintyDoesNotMutateOrClaimWork(t *testing.T) {
 				}
 				return errors.New("cleanup uncertain")
 			}},
-				inspector: inspectFunc(func(context.Context, runtime.Spec) (runtime.Instance, error) {
+				runtime: testRuntime{inspect: func(context.Context, runtime.Spec) (runtime.Instance, error) {
 					switch problem {
-					case "existing container":
-						return runtime.Instance{ID: strings.Repeat("c", 64), Status: "exited"}, nil
 					case "foreign container":
 						return runtime.Instance{}, runtime.ErrNotOwned
 					case "inspect error":
 						return runtime.Instance{}, errors.New("Docker unavailable")
 					}
 					return runtime.Instance{}, runtime.ErrNotFound
-				}),
+				}},
 				acquire: func(context.Context) (lease, error) { return testLease{}, nil },
 			}
 			if err := w.Run(t.Context()); err == nil {

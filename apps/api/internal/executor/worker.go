@@ -21,6 +21,7 @@ type store interface {
 	BeginBuild(context.Context, deployments.Claim) (deployments.Deployment, error)
 	BeginStart(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
 	GetInstance(context.Context, string) (deployments.RuntimeInstance, error)
+	RecordInstance(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	FailExecution(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
 }
 
@@ -29,8 +30,12 @@ type builder interface {
 	Cleanup(context.Context, builds.Input, string) error
 }
 
-type inspector interface {
+type containerRuntime interface {
+	Create(context.Context, runtime.Spec) (runtime.Instance, error)
+	Start(context.Context, runtime.Spec) (runtime.Instance, error)
 	Inspect(context.Context, runtime.Spec) (runtime.Instance, error)
+	Stop(context.Context, runtime.Spec) (runtime.Instance, error)
+	Remove(context.Context, runtime.Spec) error
 }
 
 type fetcher interface {
@@ -41,7 +46,7 @@ type Worker struct {
 	store         store
 	fetcher       fetcher
 	builder       builder
-	inspector     inspector
+	runtime       containerRuntime
 	close         func() error
 	acquire       func(context.Context) (lease, error)
 	pollInterval  time.Duration
@@ -60,13 +65,13 @@ func New(config Config, pool *pgxpool.Pool) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	runtimeInspector, err := runtime.NewManager(runtime.Config{DockerHost: config.DockerHost})
+	containers, err := runtime.NewManager(runtime.Config{DockerHost: config.DockerHost})
 	if err != nil {
 		_ = imageBuilder.Close()
 		return nil, err
 	}
-	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, inspector: runtimeInspector,
-		close:        func() error { return errors.Join(imageBuilder.Close(), runtimeInspector.Close()) },
+	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, runtime: containers,
+		close:        func() error { return errors.Join(imageBuilder.Close(), containers.Close()) },
 		acquire:      func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) },
 		pollInterval: time.Second, checkInterval: time.Second}, nil
 }
@@ -168,7 +173,7 @@ func (w *Worker) recover(ctx context.Context) error {
 			return err
 		}
 		writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		_, err = w.store.FailExecution(writeCtx, claim, claim.Status, "Deployment was interrupted before container startup.")
+		_, err = w.store.FailExecution(writeCtx, claim, claim.Status, "Deployment was interrupted by an executor restart.")
 		cancel()
 		if errors.Is(err, deployments.ErrInvalidTransition) {
 			continue
@@ -179,8 +184,8 @@ func (w *Worker) recover(ctx context.Context) error {
 	}
 }
 
-// execute builds from the exact checkout and records an instance intent.
-// Container creation is a separate stage and is not performed here.
+// execute builds and starts a candidate. Readiness and route activation are
+// separate, so observed process startup does not complete the deployment.
 func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultErr error) {
 	checkout, err := w.fetcher.Fetch(ctx, claim.GitURL, claim.Branch)
 	if err != nil {
@@ -234,10 +239,10 @@ func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultEr
 		return err
 	}
 	writeCtx, stop = context.WithTimeout(ctx, 3*time.Second)
-	defer stop()
-	_, err = w.store.BeginStart(writeCtx, claim, image.Reference, image.ID)
+	deployment, err := w.store.BeginStart(writeCtx, claim, image.Reference, image.ID)
+	stop()
 	if err != nil {
 		return fmt.Errorf("record built image: %w", err)
 	}
-	return nil
+	return w.startup(ctx, claim, deployment)
 }

@@ -154,6 +154,61 @@ func TestManagerRejectsForeignContainersAndAllowsSafeDriftCleanup(t *testing.T) 
 	}
 }
 
+func TestManagerRejectsDifferentContainerBehindPinnedIdentity(t *testing.T) {
+	for _, operation := range []string{"create", "start", "inspect", "stop", "remove"} {
+		t.Run(operation, func(t *testing.T) {
+			m, f, spec := runtimeTestExisting(t)
+			spec.ContainerID = strings.Repeat("b", 64)
+			var err error
+			switch operation {
+			case "create":
+				_, err = m.Create(t.Context(), spec)
+			case "start":
+				_, err = m.Start(t.Context(), spec)
+			case "inspect":
+				_, err = m.Inspect(t.Context(), spec)
+			case "stop":
+				_, err = m.Stop(t.Context(), spec)
+			case "remove":
+				err = m.Remove(t.Context(), spec)
+			}
+			if !errors.Is(err, ErrNotOwned) || f.createdCount != 1 || f.started != 0 || f.stopped != 0 || len(f.removed) != 0 {
+				t.Fatalf("replacement container accepted or mutated: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagerPinnedCreateOnlyAdoptsTheRecordedContainer(t *testing.T) {
+	m, f, spec := runtimeTestExisting(t)
+	spec.ContainerID = f.container.ID
+	if got, err := m.Create(t.Context(), spec); err != nil || got.ID != spec.ContainerID || f.createdCount != 1 {
+		t.Fatalf("adopt pinned container: %+v, %v", got, err)
+	}
+	if got, err := m.Start(t.Context(), spec); err != nil || got.ID != spec.ContainerID || !got.Running {
+		t.Fatalf("start pinned container: %+v, %v", got, err)
+	}
+	if got, err := m.Stop(t.Context(), spec); err != nil || got.ID != spec.ContainerID || got.Running {
+		t.Fatalf("stop pinned container: %+v, %v", got, err)
+	}
+	if err := m.Remove(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(t.Context(), spec); !errors.Is(err, ErrNotFound) || f.createdCount != 1 {
+		t.Fatalf("missing pinned container was recreated: %v", err)
+	}
+}
+
+func TestManagerRejectsMalformedPinnedContainerIDsBeforeDocker(t *testing.T) {
+	for _, id := range []string{"short-id", strings.Repeat("a", 63), strings.Repeat("a", 65), strings.Repeat("A", 64), "sha256:" + strings.Repeat("a", 64)} {
+		m, f, spec := runtimeTestManager(t)
+		spec.ContainerID = id
+		if _, err := m.Start(t.Context(), spec); !errors.Is(err, ErrInvalidInput) || f.calls != 0 {
+			t.Errorf("invalid container pin reached Docker: %v", err)
+		}
+	}
+}
+
 func TestManagerFailedStartCleanupDoesNotKillAmbiguousRunningInstance(t *testing.T) {
 	for _, running := range []bool{false, true} {
 		t.Run(strconv.FormatBool(running), func(t *testing.T) {

@@ -23,6 +23,7 @@ const memoryLimit = 256 << 20
 
 func normalizeSpec(spec Spec) (Spec, error) {
 	if !uuidPattern.MatchString(spec.ProjectID) || !uuidPattern.MatchString(spec.DeploymentID) || !uuidPattern.MatchString(spec.InstanceID) ||
+		spec.ContainerID != "" && !containerIDPattern.MatchString(spec.ContainerID) ||
 		!imageIDPattern.MatchString(spec.ImageID) || !commitPattern.MatchString(spec.CommitSHA) || spec.AppPort < 1 || spec.AppPort > 65535 {
 		return Spec{}, ErrInvalidInput
 	}

@@ -13,11 +13,11 @@ func (w *Worker) cleanInterrupted(ctx context.Context, claim deployments.Claim) 
 	if claim.Status == deployments.StatusFetchingSource {
 		return nil
 	}
-	if claim.Status == deployments.StatusStarting {
+	if claim.Status == deployments.StatusStarting || claim.Status == deployments.StatusHealthChecking {
 		return w.cleanupStartup(ctx, claim, claim.Deployment)
 	}
 	if claim.Status != deployments.StatusBuilding {
-		return errors.New("executor cannot recover readiness or active deployment stages")
+		return errors.New("executor cannot recover active deployment stages")
 	}
 	if claim.CommitSHA == nil {
 		return errors.New("interrupted build has no recorded source commit")

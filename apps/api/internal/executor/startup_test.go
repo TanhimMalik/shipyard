@@ -9,6 +9,7 @@ import (
 
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/health"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -67,8 +68,8 @@ func TestStartupPersistsCreatedAndRunningContainerWithPinnedIdentity(t *testing.
 			return workerTestContainer(spec, true), nil
 		},
 	}
-	if err := w.startup(t.Context(), claim, deployment); err != nil {
-		t.Fatal(err)
+	if started, err := w.startup(t.Context(), claim, deployment); err != nil || !started {
+		t.Fatalf("started=%t error=%v", started, err)
 	}
 	want := "create,record created,start,record running"
 	if strings.Join(calls, ",") != want || saved.ContainerID == nil || *saved.ContainerID != strings.Repeat("c", 64) || saved.Running == nil || !*saved.Running || saved.HostPort == nil || *saved.HostPort != 32123 {
@@ -111,7 +112,7 @@ func TestStartupStorageUncertaintyPreservesTheContainer(t *testing.T) {
 				t.Fatal("removed image after uncertain observation")
 				return nil
 			}}
-			if err := w.startup(t.Context(), claim, deployment); !errors.Is(err, uncertain) || started != (stage == "running") {
+			if ready, err := w.startup(t.Context(), claim, deployment); ready || !errors.Is(err, uncertain) || started != (stage == "running") {
 				t.Fatalf("stage=%s started=%t error=%v", stage, started, err)
 			}
 		})
@@ -192,7 +193,7 @@ func TestStartupKnownFailuresCleanOnlyTheRecordedContainer(t *testing.T) {
 				imageCleaned = true
 				return nil
 			}}
-			if err := w.startup(t.Context(), claim, deployment); err != nil || !failed {
+			if started, err := w.startup(t.Context(), claim, deployment); started || err != nil || !failed {
 				t.Fatalf("failed=%t error=%v", failed, err)
 			}
 			if failure == "exit" && (saved.ExitCode == nil || *saved.ExitCode != 7) {
@@ -217,72 +218,96 @@ func TestAmbiguousCreationAndCancellationRemainRecoverable(t *testing.T) {
 			return deployment, nil
 		}
 		w.store = store
-		if err := w.startup(t.Context(), claim, deployment); !errors.Is(err, problem) {
+		if started, err := w.startup(t.Context(), claim, deployment); started || !errors.Is(err, problem) {
 			t.Fatalf("lost create cause: %v", err)
 		}
 	}
 }
 
-func TestLeaseLossDuringStartupCancelsBeforeOwnershipRelease(t *testing.T) {
-	claim := workerTestClaim()
-	sha := strings.Repeat("a", 40)
-	deployment := workerTestStarting(claim, sha)
-	w, _ := startupTestWorker(t, claim, deployment)
-	entered, exited := make(chan struct{}), make(chan struct{})
-	lost := errors.New("lease lost while starting")
-	claimed := false
-	store := w.store.(testStore)
-	store.claim = func(context.Context) (deployments.Claim, error) {
-		if claimed {
-			t.Fatal("claimed after lease loss")
-		}
-		claimed = true
-		return claim, nil
-	}
-	store.record = func(context.Context, deployments.Claim, string) (deployments.Deployment, error) {
-		return claim.Deployment, nil
-	}
-	store.beginBuild = func(context.Context, deployments.Claim) (deployments.Deployment, error) { return claim.Deployment, nil }
-	store.beginStart = func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error) {
-		return deployment, nil
-	}
-	store.fail = func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error) {
-		t.Fatal("terminalized canceled startup")
-		return deployment, nil
-	}
-	w.store = store
-	w.fetcher = fetchFunc(func(context.Context, string, string) (*source.Checkout, error) {
-		return &source.Checkout{Path: t.TempDir(), CommitSHA: sha}, nil
-	})
-	w.builder = testBuilder{build: func(context.Context, builds.Input) (builds.Image, error) { return workerTestImage(claim.ID), nil }}
-	w.runtime = testRuntime{start: func(ctx context.Context, s runtime.Spec) (runtime.Instance, error) {
-		close(entered)
-		<-ctx.Done()
-		close(exited)
-		return runtime.Instance{}, ctx.Err()
-	}}
-	w.acquire = func(context.Context) (lease, error) {
-		return testLease{check: func(ctx context.Context) error {
-			select {
-			case <-entered:
-				return lost
-			case <-ctx.Done():
-				return ctx.Err()
+func TestLeaseLossDuringStartupOrReadinessCancelsBeforeOwnershipRelease(t *testing.T) {
+	for _, phase := range []string{"startup", "readiness"} {
+		t.Run(phase, func(t *testing.T) {
+			claim := workerTestClaim()
+			sha := strings.Repeat("a", 40)
+			deployment := workerTestStarting(claim, sha)
+			w, _ := startupTestWorker(t, claim, deployment)
+			entered, exited := make(chan struct{}), make(chan struct{})
+			lost := errors.New("lease lost while starting")
+			claimed := false
+			store := w.store.(testStore)
+			store.claim = func(context.Context) (deployments.Claim, error) {
+				if claimed {
+					t.Fatal("claimed after lease loss")
+				}
+				claimed = true
+				return claim, nil
 			}
-		}, close: func() error {
-			select {
-			case <-exited:
-			default:
-				t.Error("released ownership before Docker call returned")
+			store.record = func(context.Context, deployments.Claim, string) (deployments.Deployment, error) {
+				return claim.Deployment, nil
 			}
-			return nil
-		}}, nil
-	}
-	w.pollInterval, w.checkInterval = time.Millisecond, time.Millisecond
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := w.Run(ctx); !errors.Is(err, lost) {
-		t.Fatal(err)
+			store.beginBuild = func(context.Context, deployments.Claim) (deployments.Deployment, error) { return claim.Deployment, nil }
+			store.beginStart = func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error) {
+				return deployment, nil
+			}
+			store.beginHealth = func(context.Context, deployments.Claim) (deployments.Deployment, error) {
+				got := deployment
+				got.Status = deployments.StatusHealthChecking
+				return got, nil
+			}
+			store.readiness = func(context.Context, deployments.Claim, string, deployments.ReadinessObservation) (deployments.Deployment, error) {
+				t.Fatal("persisted canceled readiness")
+				return deployment, nil
+			}
+			store.fail = func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error) {
+				t.Fatal("terminalized canceled startup")
+				return deployment, nil
+			}
+			w.store = store
+			w.fetcher = fetchFunc(func(context.Context, string, string) (*source.Checkout, error) {
+				return &source.Checkout{Path: t.TempDir(), CommitSHA: sha}, nil
+			})
+			w.builder = testBuilder{build: func(context.Context, builds.Input) (builds.Image, error) { return workerTestImage(claim.ID), nil }}
+			w.runtime = testRuntime{start: func(ctx context.Context, s runtime.Spec) (runtime.Instance, error) {
+				close(entered)
+				<-ctx.Done()
+				close(exited)
+				return runtime.Instance{}, ctx.Err()
+			}}
+			if phase == "readiness" {
+				w.runtime = testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+					return workerTestContainer(spec, true), nil
+				}}
+				w.readiness = probeFunc(func(ctx context.Context, target health.Target) (health.Result, error) {
+					close(entered)
+					<-ctx.Done()
+					close(exited)
+					return health.Result{}, ctx.Err()
+				})
+			}
+			w.acquire = func(context.Context) (lease, error) {
+				return testLease{check: func(ctx context.Context) error {
+					select {
+					case <-entered:
+						return lost
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}, close: func() error {
+					select {
+					case <-exited:
+					default:
+						t.Error("released ownership before Docker call returned")
+					}
+					return nil
+				}}, nil
+			}
+			w.pollInterval, w.checkInterval = time.Millisecond, time.Millisecond
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if err := w.Run(ctx); !errors.Is(err, lost) {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

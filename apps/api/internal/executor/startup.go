@@ -14,52 +14,52 @@ import (
 	"shipyard/apps/api/internal/runtime"
 )
 
-func (w *Worker) startup(ctx context.Context, claim deployments.Claim, deployment deployments.Deployment) error {
+func (w *Worker) startup(ctx context.Context, claim deployments.Claim, deployment deployments.Deployment) (bool, error) {
 	spec, err := startupSpec(deployment)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if deployment.ID != claim.ID || deployment.ProjectID != claim.ProjectID {
-		return errors.New("startup metadata does not belong to this claim")
+	if deployment.ID != claim.ID || deployment.ProjectID != claim.ProjectID || deployment.Status != deployments.StatusStarting {
+		return false, errors.New("startup metadata does not belong to this claim")
 	}
 	created, err := w.runtime.Create(ctx, spec)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return fmt.Errorf("container creation outcome is uncertain: %w", err)
+			return false, fmt.Errorf("container creation outcome is uncertain: %w", err)
 		}
 		// A lost create response can conceal a container not visible yet. Only
 		// definite pre-create rejections can terminalize an unknown identity.
 		if !errors.Is(err, runtime.ErrInvalidInput) && !errors.Is(err, runtime.ErrUnsupportedImage) &&
 			!errors.Is(err, runtime.ErrUnsupportedEngine) && !errdefs.IsInvalidArgument(err) {
-			return fmt.Errorf("container creation outcome is uncertain: %w", err)
+			return false, fmt.Errorf("container creation outcome is uncertain: %w", err)
 		}
-		return w.failStartup(ctx, claim, deployment, "Container creation failed.", err)
+		return false, w.failStartup(ctx, claim, deployment, "Container creation failed.", err)
 	}
 	if err := w.recordInstance(ctx, claim, *deployment.InstanceID, created); err != nil {
-		return err
+		return false, err
 	}
 	spec.ContainerID = created.ID
 	started, err := w.runtime.Start(ctx, spec)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
-		return w.failStartup(ctx, claim, deployment, "Container startup failed.", err)
+		return false, w.failStartup(ctx, claim, deployment, "Container startup failed.", err)
 	}
 	if err := w.recordInstance(ctx, claim, *deployment.InstanceID, started); err != nil {
-		return err
+		return false, err
 	}
 	if !started.Running || started.Status != "running" {
-		return w.failStartup(ctx, claim, deployment, "Application did not stay running during startup.", errors.New("candidate was not running after startup"))
+		return false, w.failStartup(ctx, claim, deployment, "Application did not stay running during startup.", errors.New("candidate was not running after startup"))
 	}
-	return nil
+	return true, nil
 }
 
 func startupSpec(deployment deployments.Deployment) (runtime.Spec, error) {
-	if deployment.Status != deployments.StatusStarting || deployment.InstanceID == nil || deployment.ImageID == nil ||
+	if (deployment.Status != deployments.StatusStarting && deployment.Status != deployments.StatusHealthChecking) || deployment.InstanceID == nil || deployment.ImageID == nil ||
 		deployment.ImageReference == nil || deployment.CommitSHA == nil {
 		return runtime.Spec{}, errors.New("startup has incomplete persisted instance metadata")
 	}

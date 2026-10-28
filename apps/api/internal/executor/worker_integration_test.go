@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 	"shipyard/apps/api/migrations"
 )
@@ -90,7 +91,9 @@ func TestAsyncSourceOwnershipAPIAndRestartRecovery(t *testing.T) {
 		t.Fatalf("restart did not preserve interrupted failure: %+v", failed)
 	}
 	next := executorTestQueue(t, api.URL, projectID)
-	checkpoint := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusStarting })
+	checkpoint := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool {
+		return d.Status == deployments.StatusHealthChecking && d.ReadinessPassed != nil && *d.ReadinessPassed
+	})
 	if checkpoint.CommitSHA == nil || *checkpoint.CommitSHA != strings.Repeat("b", 40) || checkpoint.ImageID == nil || checkpoint.InstanceID == nil {
 		t.Fatalf("build checkpoint was not saved: %+v", checkpoint)
 	}
@@ -103,7 +106,7 @@ func TestAsyncSourceOwnershipAPIAndRestartRecovery(t *testing.T) {
 	}
 	stopRecovery := executorTestRun(t, executorTestWorker(pool, nil))
 	recovered := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed })
-	if recovered.CommitSHA == nil || *recovered.CommitSHA != strings.Repeat("b", 40) || recovered.ImageID == nil || *recovered.ImageID != *checkpoint.ImageID || recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusStarting {
+	if recovered.CommitSHA == nil || *recovered.CommitSHA != strings.Repeat("b", 40) || recovered.ImageID == nil || *recovered.ImageID != *checkpoint.ImageID || recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusHealthChecking || recovered.ReadinessPassed == nil || !*recovered.ReadinessPassed {
 		t.Fatalf("restart discarded build history or failed the wrong stage: %+v", recovered)
 	}
 	if err := stopRecovery(); err != nil {
@@ -185,7 +188,9 @@ func executorTestWorker(pool *pgxpool.Pool, fetcher fetcher) *Worker {
 				return workerTestImage(input.DeploymentID), nil
 			},
 			cleanup: func(context.Context, builds.Input, string) error { return nil },
-		}, runtime: testRuntime{},
+		}, runtime: testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+			return workerTestContainer(spec, true), nil
+		}}, readiness: probeFunc(workerTestReady),
 		acquire: func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) }, pollInterval: 5 * time.Millisecond, checkInterval: 20 * time.Millisecond}
 }
 

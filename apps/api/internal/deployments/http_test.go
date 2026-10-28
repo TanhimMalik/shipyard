@@ -226,6 +226,19 @@ func TestHTTPGetDeploymentExecutionMetadata(t *testing.T) {
 	httpTestDeploymentResponse(t, response, http.StatusOK, want)
 }
 
+func TestHTTPGetDeploymentReadinessObservation(t *testing.T) {
+	want := httpTestDeployment(httpTestDeploymentID)
+	passed, attempts, status := false, 4, 503
+	checked := want.CreatedAt.Add(time.Second)
+	want.Status = StatusHealthChecking
+	want.ReadinessPassed, want.ReadinessAttempts = &passed, &attempts
+	want.ReadinessStatusCode, want.ReadinessCheckedAt = &status, &checked
+	store := &httpTestStore{get: func(context.Context, string) (Deployment, error) { return want, nil }}
+	response := httptest.NewRecorder()
+	NewHandler(store).ServeHTTP(response, httptest.NewRequest(http.MethodGet, httpTestDetailURL, nil))
+	httpTestDeploymentResponse(t, response, http.StatusOK, want)
+}
+
 func TestHTTPRejectsInvalidIDsBeforeStore(t *testing.T) {
 	for _, id := range []string{"not-a-uuid", strings.ReplaceAll(httpTestProjectID, "-", ""), "abcdef12-3456-4789-abcd-123456789abg"} {
 		for _, route := range []struct{ method, path string }{
@@ -481,7 +494,7 @@ func httpTestDeploymentResponse(t *testing.T, response *httptest.ResponseRecorde
 		gotFields = append(gotFields, field)
 	}
 	slices.Sort(gotFields)
-	wantFields := []string{"app_port", "branch", "commit_sha", "created_at", "failure_reason", "failure_stage", "finished_at", "git_url", "health_path", "id", "image_id", "image_reference", "instance_id", "project_id", "started_at", "status", "updated_at"}
+	wantFields := []string{"app_port", "branch", "commit_sha", "created_at", "failure_reason", "failure_stage", "finished_at", "git_url", "health_path", "id", "image_id", "image_reference", "instance_id", "project_id", "readiness_attempts", "readiness_checked_at", "readiness_passed", "readiness_status_code", "started_at", "status", "updated_at"}
 	if !slices.Equal(gotFields, wantFields) {
 		t.Errorf("deployment JSON fields = %v, want %v", gotFields, wantFields)
 	}

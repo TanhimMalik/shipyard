@@ -28,6 +28,7 @@ type PostgresStore struct {
 
 const deploymentColumns = `id::text, project_id::text, git_url, branch, app_port, health_path,
 	status, commit_sha, image_reference, image_id, instance_id::text,
+	readiness_passed, readiness_attempts, readiness_status_code, readiness_checked_at,
 	failure_stage, failure_reason, started_at, finished_at, created_at, updated_at`
 
 func NewStore(pool *pgxpool.Pool) *PostgresStore {
@@ -115,6 +116,7 @@ func scanDeployment(row pgx.Row, extra ...any) (Deployment, error) {
 	fields := []any{&deployment.ID, &deployment.ProjectID, &deployment.GitURL, &deployment.Branch,
 		&deployment.AppPort, &deployment.HealthPath, &deployment.Status, &deployment.CommitSHA,
 		&deployment.ImageReference, &deployment.ImageID, &deployment.InstanceID,
+		&deployment.ReadinessPassed, &deployment.ReadinessAttempts, &deployment.ReadinessStatusCode, &deployment.ReadinessCheckedAt,
 		&deployment.FailureStage, &deployment.FailureReason, &deployment.StartedAt, &deployment.FinishedAt,
 		&deployment.CreatedAt, &deployment.UpdatedAt}
 	err := row.Scan(append(fields, extra...)...)
@@ -125,6 +127,9 @@ func scanDeployment(row pgx.Row, extra ...any) (Deployment, error) {
 	}
 	if deployment.FinishedAt != nil {
 		*deployment.FinishedAt = deployment.FinishedAt.UTC()
+	}
+	if deployment.ReadinessCheckedAt != nil {
+		*deployment.ReadinessCheckedAt = deployment.ReadinessCheckedAt.UTC()
 	}
 	return deployment, err
 }

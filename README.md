@@ -6,9 +6,9 @@ Linux host.
 
 It's still in development. Project screens and the local API work. The optional
 worker can fetch approved repositories, build their Dockerfiles, start containers,
-and save the observed Docker state. HTTP readiness probes are implemented separately;
-worker integration, routing, UI deployment controls, and remote admin access come
-next. Deployments currently stop at `STARTING`.
+check HTTP readiness, and save the observed state. Passed checks stay in
+`HEALTH_CHECKING` until routing is implemented. UI deployment controls and remote
+admin access also come next.
 
 ## Run locally
 
@@ -67,12 +67,13 @@ this is for approved, controlled repositories, not hostile code.
 
 Readiness probes use the Docker host's loopback port and configured path. They
 accept HTTP 2xx, retry for up to 30 seconds by default, and reject redirects.
-They do not yet advance deployment state or activate routes.
+The worker verifies the same container and port before and after probing, then
+saves the final result. A passed check does not activate a route.
 
 Startup failures clean up verified owned resources before recording failure.
 Uncertain Docker or database results preserve the unfinished attempt for recovery.
-On restart, the worker cleans interrupted source, build, and startup attempts;
-it does not resume them. Later lifecycle stages are not handled yet. Abrupt crashes
+On restart, the worker cleans interrupted source, build, startup, and readiness
+attempts; it does not resume them. Later lifecycle stages are not handled yet. Abrupt crashes
 can leave source directories or late Docker resources requiring manual cleanup
 while the worker is stopped. Build cache is retained.
 

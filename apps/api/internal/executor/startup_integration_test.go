@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +25,7 @@ import (
 	"github.com/moby/moby/client"
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/health"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -43,7 +47,7 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 		t.Fatalf("fixture needs a Linux arm64/amd64 engine: OS=%s arch=%s error=%v", version.Os, version.Arch, err)
 	}
 	app := executorTestCompileApp(t, version.Arch)
-	for _, scenario := range []string{"running candidate and restart cleanup", "missing COPY source", "bad ENTRYPOINT"} {
+	for _, scenario := range []string{"running candidate and restart cleanup", "missing COPY source", "bad ENTRYPOINT", "readiness timeout"} {
 		t.Run(scenario, func(t *testing.T) {
 			pool := executorTestDatabase(t)
 			store := deployments.NewStore(pool)
@@ -75,10 +79,17 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				return &source.Checkout{Path: root, CommitSHA: sha}, nil
 			}))
 			worker.builder, worker.runtime = builder, manager
+			worker.readiness = executorTestReadiness(t)
 			stop := executorTestRun(t, worker)
 			api := httptest.NewServer(deployments.NewHandler(store))
 			t.Cleanup(api.Close)
-			queued := executorTestQueue(t, api.URL, executorTestProject(t, pool, "https://example.com/startup-fixture.git", "main"))
+			projectID := executorTestProject(t, pool, "https://example.com/startup-fixture.git", "main")
+			if scenario == "readiness timeout" {
+				if _, err := pool.Exec(t.Context(), `UPDATE projects SET health_path = '/missing' WHERE id = $1`, projectID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			queued := executorTestQueue(t, api.URL, projectID)
 			input := builds.Input{DeploymentID: queued.ID, CommitSHA: sha, BuildID: queued.ID}
 			reference := workerTestImage(queued.ID).Reference
 			t.Cleanup(func() {
@@ -105,7 +116,7 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				}
 			})
 			saved := executorTestWait(t, store, queued.ID, func(d deployments.Deployment) bool {
-				return d.Status == deployments.StatusStarting || d.Status == deployments.StatusFailed
+				return d.Status == deployments.StatusHealthChecking && d.ReadinessPassed != nil || d.Status == deployments.StatusFailed
 			}, 45*time.Second)
 			if saved.CommitSHA == nil || *saved.CommitSHA != sha {
 				t.Fatalf("build lost source history: %+v", saved)
@@ -115,6 +126,8 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				stage, reason := deployments.StatusStarting, "Container startup failed."
 				if scenario == "missing COPY source" {
 					stage, reason = deployments.StatusBuilding, "Image build failed."
+				} else if scenario == "readiness timeout" {
+					stage, reason = deployments.StatusHealthChecking, "Application did not become ready before the readiness deadline."
 				}
 				if saved.FailureStage == nil || *saved.FailureStage != stage || saved.FailureReason == nil || *saved.FailureReason != reason {
 					t.Fatalf("failed wrong stage or leaked diagnostics: %+v", saved)
@@ -134,6 +147,13 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 					if _, err := docker.ContainerInspect(t.Context(), *instance.ContainerID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 						t.Fatalf("failed startup left container: %v", err)
 					}
+				}
+				if scenario == "readiness timeout" {
+					if saved.ReadinessPassed == nil || *saved.ReadinessPassed || saved.ReadinessAttempts == nil || *saved.ReadinessAttempts < 1 || saved.ReadinessStatusCode == nil || *saved.ReadinessStatusCode != 404 && *saved.ReadinessStatusCode != 0 || saved.ReadinessCheckedAt == nil {
+						t.Fatalf("missing durable failed readiness result: %+v", saved)
+					}
+				} else if saved.ReadinessPassed != nil {
+					t.Fatalf("failure before readiness invented a probe result: %+v", saved)
 				}
 				if _, err := docker.ImageInspect(t.Context(), reference); !errdefs.IsNotFound(err) {
 					t.Fatalf("failed attempt left image: %v", err)
@@ -160,8 +180,11 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				t.Fatalf("unexpected candidate HTTP: %q", body)
 			}
 			current, err := store.Get(t.Context(), saved.ID)
-			if err != nil || current.Status != deployments.StatusStarting || current.FinishedAt != nil {
-				t.Fatalf("startup incorrectly completed readiness: %+v, %v", current, err)
+			if err != nil || current.Status != deployments.StatusHealthChecking || current.FinishedAt != nil || current.ReadinessPassed == nil || !*current.ReadinessPassed || current.ReadinessStatusCode == nil || *current.ReadinessStatusCode != 200 || current.ReadinessAttempts == nil || *current.ReadinessAttempts < 1 || current.ReadinessCheckedAt == nil {
+				t.Fatalf("readiness did not retain a pending, unrouted result: %+v, %v", current, err)
+			}
+			if _, err := store.Create(t.Context(), current.ProjectID); !errors.Is(err, deployments.ErrAlreadyQueued) {
+				t.Fatalf("unrouted ready candidate released the unfinished slot: %v", err)
 			}
 			if err := stop(); err != nil {
 				t.Fatal(err)
@@ -170,7 +193,7 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 			replacement.builder, replacement.runtime = builder, manager
 			stopRecovery := executorTestRun(t, replacement)
 			recovered := executorTestWait(t, store, saved.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed }, 15*time.Second)
-			if recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusStarting || recovered.ImageID == nil || *recovered.ImageID != *saved.ImageID || recovered.InstanceID == nil || *recovered.InstanceID != *saved.InstanceID {
+			if recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusHealthChecking || recovered.ImageID == nil || *recovered.ImageID != *saved.ImageID || recovered.InstanceID == nil || *recovered.InstanceID != *saved.InstanceID || recovered.ReadinessPassed == nil || !*recovered.ReadinessPassed || !recovered.ReadinessCheckedAt.Equal(*current.ReadinessCheckedAt) {
 				t.Fatalf("restart lost startup history: %+v", recovered)
 			}
 			if err := stopRecovery(); err != nil {
@@ -284,4 +307,40 @@ func executorTestHTTP(t *testing.T, port int, path string) []byte {
 	}
 	t.Fatalf("candidate HTTP on Docker host loopback failed: %v", last)
 	return nil
+}
+
+func executorTestReadiness(t *testing.T) readinessChecker {
+	t.Helper()
+	checker, err := health.NewChecker(health.Config{Timeout: 2 * time.Second, RequestTimeout: 500 * time.Millisecond, Interval: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := os.Getenv("SHIPYARD_TEST_DOCKER_HTTP_PROXY")
+	if proxy == "" {
+		return checker
+	}
+	address, err := url.Parse(proxy)
+	if err != nil || address.Scheme != "socks5" || address.Hostname() != "127.0.0.1" || address.Port() == "" || address.User != nil || address.Path != "" || address.RawQuery != "" || address.Fragment != "" {
+		t.Fatal("SHIPYARD_TEST_DOCKER_HTTP_PROXY must be a loopback socks5://127.0.0.1:port URL")
+	}
+	// The production checker stays proxy-free. This test relay bridges only the
+	// known VM loopback endpoint to a temporary local port.
+	return probeFunc(func(ctx context.Context, target health.Target) (health.Result, error) {
+		backend := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(target.HostPort))}
+		transport := &http.Transport{Proxy: http.ProxyURL(address), DisableKeepAlives: true, ResponseHeaderTimeout: 500 * time.Millisecond}
+		defer transport.CloseIdleConnections()
+		relay := httputil.NewSingleHostReverseProxy(backend)
+		relay.Transport = transport
+		server := httptest.NewServer(relay)
+		defer server.Close()
+		_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+		if err != nil {
+			return health.Result{}, err
+		}
+		localPort, err := strconv.Atoi(port)
+		if err != nil {
+			return health.Result{}, err
+		}
+		return checker.Wait(ctx, health.Target{HostPort: localPort, Path: target.Path})
+	})
 }

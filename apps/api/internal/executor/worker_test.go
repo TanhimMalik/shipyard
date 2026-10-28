@@ -11,6 +11,7 @@ import (
 
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/health"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -93,6 +94,8 @@ type testStore struct {
 	record      func(context.Context, deployments.Claim, string) (deployments.Deployment, error)
 	beginBuild  func(context.Context, deployments.Claim) (deployments.Deployment, error)
 	beginStart  func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
+	beginHealth func(context.Context, deployments.Claim) (deployments.Deployment, error)
+	readiness   func(context.Context, deployments.Claim, string, deployments.ReadinessObservation) (deployments.Deployment, error)
 	instance    func(context.Context, string) (deployments.RuntimeInstance, error)
 	observe     func(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	fail        func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
@@ -118,6 +121,12 @@ func (s testStore) BeginBuild(ctx context.Context, claim deployments.Claim) (dep
 }
 func (s testStore) BeginStart(ctx context.Context, claim deployments.Claim, reference, id string) (deployments.Deployment, error) {
 	return s.beginStart(ctx, claim, reference, id)
+}
+func (s testStore) BeginHealthCheck(ctx context.Context, claim deployments.Claim) (deployments.Deployment, error) {
+	return s.beginHealth(ctx, claim)
+}
+func (s testStore) RecordReadiness(ctx context.Context, claim deployments.Claim, id string, observed deployments.ReadinessObservation) (deployments.Deployment, error) {
+	return s.readiness(ctx, claim, id, observed)
 }
 func (s testStore) GetInstance(ctx context.Context, id string) (deployments.RuntimeInstance, error) {
 	return s.instance(ctx, id)
@@ -151,7 +160,17 @@ func (l testLease) Close() error {
 }
 
 func workerTestClaim() deployments.Claim {
-	return deployments.Claim{Deployment: deployments.Deployment{ID: "00000000-0000-4000-8000-000000000061", ProjectID: "00000000-0000-4000-8000-000000000062", GitURL: "https://example.com/old.git", Branch: "release/old", AppPort: 8080, Status: deployments.StatusFetchingSource}, Token: "private-owner"}
+	return deployments.Claim{Deployment: deployments.Deployment{ID: "00000000-0000-4000-8000-000000000061", ProjectID: "00000000-0000-4000-8000-000000000062", GitURL: "https://example.com/old.git", Branch: "release/old", AppPort: 8080, HealthPath: "/ready", Status: deployments.StatusFetchingSource}, Token: "private-owner"}
+}
+
+type probeFunc func(context.Context, health.Target) (health.Result, error)
+
+func (f probeFunc) Wait(ctx context.Context, target health.Target) (health.Result, error) {
+	return f(ctx, target)
+}
+
+func workerTestReady(context.Context, health.Target) (health.Result, error) {
+	return health.Result{Attempts: 1, StatusCode: 200, CheckedAt: time.Now().UTC()}, nil
 }
 
 func workerTestImage(id string) builds.Image {
@@ -190,7 +209,9 @@ func TestBuildPipelineUsesSnapshotAndStopsOnStorageUncertainty(t *testing.T) {
 				}
 				return claim.Deployment, nil
 			}
-			w := &Worker{runtime: testRuntime{}, fetcher: fetchFunc(func(ctx context.Context, repository, branch string) (*source.Checkout, error) {
+			w := &Worker{readiness: probeFunc(workerTestReady), runtime: testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+				return workerTestContainer(spec, true), nil
+			}}, fetcher: fetchFunc(func(ctx context.Context, repository, branch string) (*source.Checkout, error) {
 				calls = append(calls, "fetch")
 				if repository != claim.GitURL || branch != claim.Branch {
 					t.Fatal("did not use queued source snapshot")
@@ -212,6 +233,26 @@ func TestBuildPipelineUsesSnapshotAndStopsOnStorageUncertainty(t *testing.T) {
 					}
 					return write(ctx, got, "begin start")
 				},
+				instance: func(context.Context, string) (deployments.RuntimeInstance, error) {
+					id, port := strings.Repeat("c", 64), 32123
+					d := workerTestStarting(claim, sha)
+					return deployments.RuntimeInstance{ID: *d.InstanceID, DeploymentID: claim.ID, ContainerID: &id, HostPort: &port}, nil
+				},
+				beginHealth: func(ctx context.Context, got deployments.Claim) (deployments.Deployment, error) {
+					workerTestWrite(t, ctx, got, claim)
+					calls = append(calls, "begin health")
+					d := workerTestStarting(claim, sha)
+					d.Status = deployments.StatusHealthChecking
+					return d, nil
+				},
+				readiness: func(ctx context.Context, got deployments.Claim, id string, observed deployments.ReadinessObservation) (deployments.Deployment, error) {
+					workerTestWrite(t, ctx, got, claim)
+					calls = append(calls, "record readiness")
+					if !observed.Passed {
+						t.Fatal("running candidate failed fake readiness")
+					}
+					return claim.Deployment, nil
+				},
 			}, builder: testBuilder{build: func(ctx context.Context, input builds.Input) (builds.Image, error) {
 				calls = append(calls, "build")
 				if input.CheckoutPath != path || input.DeploymentID != claim.ID || input.CommitSHA != sha || input.BuildID != claim.ID {
@@ -223,7 +264,7 @@ func TestBuildPipelineUsesSnapshotAndStopsOnStorageUncertainty(t *testing.T) {
 				return image, nil
 			}}}
 			err := w.execute(t.Context(), claim)
-			want := []string{"fetch", "record", "begin build", "build", "begin start"}
+			want := []string{"fetch", "record", "begin build", "build", "begin start", "begin health", "record readiness"}
 			if failedWrite != "" {
 				if !errors.Is(err, storageError) {
 					t.Fatalf("lost storage error: %v", err)
@@ -368,7 +409,7 @@ func TestLeaseLossCancelsWorkBeforeReleasingOwnership(t *testing.T) {
 }
 
 func TestRecoveryCleansOnlySafeInterruptedStages(t *testing.T) {
-	for _, stage := range []string{deployments.StatusFetchingSource, deployments.StatusBuilding, deployments.StatusStarting} {
+	for _, stage := range []string{deployments.StatusFetchingSource, deployments.StatusBuilding, deployments.StatusStarting, deployments.StatusHealthChecking} {
 		t.Run(stage, func(t *testing.T) {
 			claim, sha, instanceID := workerTestClaim(), strings.Repeat("a", 40), "00000000-0000-4000-8000-000000000063"
 			image := workerTestImage(claim.ID)
@@ -390,14 +431,15 @@ func TestRecoveryCleansOnlySafeInterruptedStages(t *testing.T) {
 				},
 				fail: func(ctx context.Context, got deployments.Claim, gotStage, reason string) (deployments.Deployment, error) {
 					workerTestWrite(t, ctx, got, claim)
-					if gotStage != stage || reason == "" || cleaned != (stage != deployments.StatusFetchingSource) || inspected != (stage == deployments.StatusStarting) {
+					if gotStage != stage || reason == "" || cleaned != (stage != deployments.StatusFetchingSource) || inspected != (stage == deployments.StatusStarting || stage == deployments.StatusHealthChecking) {
 						t.Fatal("failed wrong stage or before safe cleanup")
 					}
 					failed = true
 					return deployments.Deployment{}, nil
 				},
 			}, builder: testBuilder{cleanup: func(ctx context.Context, input builds.Input, expectedID string) error {
-				if input.DeploymentID != claim.ID || input.CommitSHA != sha || input.BuildID != claim.ID || stage == deployments.StatusStarting && expectedID != image.ID || stage != deployments.StatusStarting && expectedID != "" {
+				candidate := stage == deployments.StatusStarting || stage == deployments.StatusHealthChecking
+				if input.DeploymentID != claim.ID || input.CommitSHA != sha || input.BuildID != claim.ID || candidate && expectedID != image.ID || !candidate && expectedID != "" {
 					t.Fatalf("cleanup identity: %+v / %s", input, expectedID)
 				}
 				cleaned = true
@@ -428,7 +470,7 @@ func TestRecoveryUncertaintyDoesNotMutateOrClaimWork(t *testing.T) {
 			instance := deployments.RuntimeInstance{ID: instanceID, DeploymentID: claim.ID}
 			switch problem {
 			case "later stage":
-				claim.Status = deployments.StatusHealthChecking
+				claim.Status = "ACTIVATING"
 			case "missing SHA":
 				claim.Status, claim.CommitSHA = deployments.StatusBuilding, nil
 			case "missing image":

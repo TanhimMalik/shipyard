@@ -47,7 +47,7 @@ func TestBuildRuntimeMigrationPreservesSourceDataAndSupportsSafeDown(t *testing.
 				t.Fatalf("upgrade changed source data: %v", err)
 			}
 			upgraded := sourceMigrationRowJSON(t, ctx, db, queued.ID)
-			if results, err := provider.Up(ctx); err != nil || len(results) != 0 {
+			if results, err := provider.UpTo(ctx, 4); err != nil || len(results) != 0 {
 				t.Fatalf("rerun: %d migrations, %v", len(results), err)
 			}
 			if sourceMigrationRowJSON(t, ctx, db, queued.ID) != upgraded {
@@ -76,7 +76,7 @@ func TestBuildRuntimeSchemaRejectsPartialMetadataAndLossyDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 4); err != nil {
 		t.Fatal(err)
 	}
 	project, queued := createSourceMigrationDeployment(t, ctx, db)

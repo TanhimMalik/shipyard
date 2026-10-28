@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
+	"shipyard/apps/api/internal/health"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -20,6 +21,8 @@ type store interface {
 	RecordSourceCommit(context.Context, deployments.Claim, string) (deployments.Deployment, error)
 	BeginBuild(context.Context, deployments.Claim) (deployments.Deployment, error)
 	BeginStart(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
+	BeginHealthCheck(context.Context, deployments.Claim) (deployments.Deployment, error)
+	RecordReadiness(context.Context, deployments.Claim, string, deployments.ReadinessObservation) (deployments.Deployment, error)
 	GetInstance(context.Context, string) (deployments.RuntimeInstance, error)
 	RecordInstance(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	FailExecution(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
@@ -42,11 +45,16 @@ type fetcher interface {
 	Fetch(context.Context, string, string) (*source.Checkout, error)
 }
 
+type readinessChecker interface {
+	Wait(context.Context, health.Target) (health.Result, error)
+}
+
 type Worker struct {
 	store         store
 	fetcher       fetcher
 	builder       builder
 	runtime       containerRuntime
+	readiness     readinessChecker
 	close         func() error
 	acquire       func(context.Context) (lease, error)
 	pollInterval  time.Duration
@@ -70,7 +78,13 @@ func New(config Config, pool *pgxpool.Pool) (*Worker, error) {
 		_ = imageBuilder.Close()
 		return nil, err
 	}
-	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, runtime: containers,
+	checks, err := health.NewChecker(health.Config{})
+	if err != nil {
+		_ = imageBuilder.Close()
+		_ = containers.Close()
+		return nil, err
+	}
+	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, runtime: containers, readiness: checks,
 		close:        func() error { return errors.Join(imageBuilder.Close(), containers.Close()) },
 		acquire:      func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) },
 		pollInterval: time.Second, checkInterval: time.Second}, nil
@@ -184,8 +198,8 @@ func (w *Worker) recover(ctx context.Context) error {
 	}
 }
 
-// execute builds and starts a candidate. Readiness and route activation are
-// separate, so observed process startup does not complete the deployment.
+// execute builds, starts, and checks a candidate. Passing readiness is separate
+// from route activation and does not complete the deployment.
 func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultErr error) {
 	checkout, err := w.fetcher.Fetch(ctx, claim.GitURL, claim.Branch)
 	if err != nil {
@@ -244,5 +258,9 @@ func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultEr
 	if err != nil {
 		return fmt.Errorf("record built image: %w", err)
 	}
-	return w.startup(ctx, claim, deployment)
+	started, err := w.startup(ctx, claim, deployment)
+	if err != nil || !started {
+		return err
+	}
+	return w.checkReadiness(ctx, claim, deployment)
 }

@@ -8,6 +8,9 @@ const (
 	StatusBuilding       = "BUILDING"
 	StatusStarting       = "STARTING"
 	StatusHealthChecking = "HEALTH_CHECKING"
+	StatusActivating     = "ACTIVATING"
+	StatusRunning        = "RUNNING"
+	StatusSuperseded     = "SUPERSEDED"
 	StatusFailed         = "FAILED"
 )
 

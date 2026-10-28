@@ -2,7 +2,7 @@
 
 The routing module publishes one Traefik file-provider configuration per project.
 It is tested separately from the deployment worker. Deployments still stop at
-`HEALTH_CHECKING`; automatic activation and saved active-route state come next.
+`HEALTH_CHECKING`; the activation storage contract is ready for worker integration.
 
 Run Traefik beside Go on the Linux Docker host. Both need access to the app ports
 published on that host's `127.0.0.1`. A native process is the simplest setup. A
@@ -51,6 +51,32 @@ mutation, but cannot interrupt an in-progress local filesystem syscall.
 A successful write means the config is saved. Traefik reloads asynchronously;
 the future activation step must confirm actual routing before reporting success.
 The adapter itself does not probe readiness, change PostgreSQL, or retire apps.
+
+## Activation state
+
+`BeginActivation` records an immutable target and the previous confirmed binding
+before a route can change. It requires passed readiness and the exact saved
+running container and port, then enters `ACTIVATING`. Repeating the same intent
+is harmless; it cannot replace the saved target.
+
+After verifying the actual proxy route, the coordinator calls `ConfirmActivation`.
+One transaction updates the active-route pointer, completes the new attempt as
+`RUNNING`, releases its claim, and marks the previous attempt `SUPERSEDED`. That
+last status does not mean its container stopped. Runtime observations and the
+previous attempt's completion history stay intact.
+
+A failed switch must restore and verify the previous route before
+`AbortActivation`. Record and clean the failed candidate before releasing its
+claim. The stored previous binding must match, and the old active route stays
+unchanged. These methods record observations supplied by the caller; they do not
+perform proxy checks or Docker operations themselves.
+
+If confirmation loses its database response, read `GetActivation` and
+`GetActiveRoute` before acting. A completed confirmation clears ownership, so
+replaying it with the released claim is rejected. Until route-aware worker
+recovery is implemented, an interrupted `ACTIVATING` attempt stops startup for
+inspection and its resources remain untouched. Migrations refuse to discard
+activation history on downgrade.
 
 ## Local access and verification
 

@@ -24,7 +24,7 @@ func TestReadinessMigrationPreservesRuntimeHistoryAndSupportsSafeDown(t *testing
 	}
 	id := createReadinessMigrationCandidate(t, ctx, db)
 	before := sourceMigrationRowJSON(t, ctx, db, id)
-	if results, err := provider.Up(ctx); err != nil || len(results) != 1 {
+	if results, err := provider.UpTo(ctx, 5); err != nil || len(results) != 1 {
 		t.Fatalf("readiness upgrade: %d migrations, %v", len(results), err)
 	}
 	var preserved string
@@ -33,7 +33,7 @@ func TestReadinessMigrationPreservesRuntimeHistoryAndSupportsSafeDown(t *testing
 		t.Fatalf("readiness upgrade changed runtime history: %v", err)
 	}
 	upgraded := sourceMigrationRowJSON(t, ctx, db, id)
-	if results, err := provider.Up(ctx); err != nil || len(results) != 0 {
+	if results, err := provider.UpTo(ctx, 5); err != nil || len(results) != 0 {
 		t.Fatalf("readiness rerun: %d migrations, %v", len(results), err)
 	}
 	if sourceMigrationRowJSON(t, ctx, db, id) != upgraded {
@@ -55,7 +55,7 @@ func TestReadinessSchemaRejectsPartialResultsAndLossyDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 5); err != nil {
 		t.Fatal(err)
 	}
 	id := createReadinessMigrationCandidate(t, ctx, db)

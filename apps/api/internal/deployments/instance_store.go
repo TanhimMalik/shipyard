@@ -56,7 +56,7 @@ func (s *PostgresStore) RecordInstance(ctx context.Context, claim Claim, instanc
 		return RuntimeInstance{}, fmt.Errorf("begin instance observation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	deployment, err := lockExecution(ctx, tx, claim, StatusStarting, StatusHealthChecking)
+	deployment, err := lockExecution(ctx, tx, claim, StatusStarting, StatusHealthChecking, StatusActivating)
 	if err != nil {
 		return RuntimeInstance{}, err
 	}

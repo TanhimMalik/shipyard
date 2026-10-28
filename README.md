@@ -10,8 +10,8 @@ check HTTP readiness, and save the observed state. Passed checks stay in
 `HEALTH_CHECKING` until routing is implemented. UI deployment controls and remote
 admin access also come next.
 
-The standalone Traefik adapter is ready for testing; see [local routing](docs/routing.md).
-Worker activation is the next step.
+The Traefik adapter and persisted activation contract are tested separately;
+see [local routing](docs/routing.md). Connecting activation to the worker is next.
 
 ## Run locally
 

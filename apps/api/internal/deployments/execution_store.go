@@ -26,7 +26,7 @@ func (s *PostgresStore) NextInterrupted(ctx context.Context) (Claim, error) {
 	var claim Claim
 	deployment, err := scanDeployment(s.pool.QueryRow(ctx, `
 		SELECT `+deploymentColumns+`, claim_token::text FROM deployments
-		WHERE status IN ('FETCHING_SOURCE', 'BUILDING', 'STARTING', 'HEALTH_CHECKING')
+		WHERE status IN ('FETCHING_SOURCE', 'BUILDING', 'STARTING', 'HEALTH_CHECKING', 'ACTIVATING')
 		ORDER BY created_at, id LIMIT 1`), &claim.Token)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Claim{}, ErrNoInterruptedDeployments

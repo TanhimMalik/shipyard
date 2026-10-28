@@ -10,6 +10,9 @@ check HTTP readiness, and save the observed state. Passed checks stay in
 `HEALTH_CHECKING` until routing is implemented. UI deployment controls and remote
 admin access also come next.
 
+The standalone Traefik adapter is ready for testing; see [local routing](docs/routing.md).
+Worker activation is the next step.
+
 ## Run locally
 
 You'll need Node 24, pnpm 12.9.1, Go 1.27.2 or newer in the Go 1.27 series, and

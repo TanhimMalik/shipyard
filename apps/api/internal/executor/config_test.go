@@ -10,9 +10,9 @@ func TestExecutorIsDisabledUnlessExplicitlyConfigured(t *testing.T) {
 	if config, err := LoadConfig(lookup); err != nil || config.Enabled {
 		t.Fatalf("default config: %+v, %v", config, err)
 	}
-	valid := map[string]string{"SHIPYARD_EXECUTOR_ENABLED": "true", "SHIPYARD_WORKSPACE_ROOT": filepath.Join(t.TempDir(), "source"), "SHIPYARD_ALLOWED_REPOSITORIES": `["https://example.com/repo.git"]`, "SHIPYARD_DOCKER_HOST": "unix:///tmp/shipyard-docker.sock", "DOCKER_HOST": "tcp://ambient.example:2375"}
+	valid := map[string]string{"SHIPYARD_EXECUTOR_ENABLED": "true", "SHIPYARD_WORKSPACE_ROOT": filepath.Join(t.TempDir(), "source"), "SHIPYARD_ALLOWED_REPOSITORIES": `["https://example.com/repo.git"]`, "SHIPYARD_DOCKER_HOST": "unix:///tmp/shipyard-docker.sock", "DOCKER_HOST": "tcp://ambient.example:2375", "SHIPYARD_ROUTES_DIR": t.TempDir(), "SHIPYARD_TRAEFIK_URL": "http://127.0.0.1:8180"}
 	read := func(key string) (string, bool) { value, exists := valid[key]; return value, exists }
-	if config, err := LoadConfig(read); err != nil || !config.Enabled || len(config.AllowedRepositories) != 1 || config.DockerHost != valid["SHIPYARD_DOCKER_HOST"] {
+	if config, err := LoadConfig(read); err != nil || !config.Enabled || len(config.AllowedRepositories) != 1 || config.DockerHost != valid["SHIPYARD_DOCKER_HOST"] || config.RoutesDirectory != valid["SHIPYARD_ROUTES_DIR"] || config.TraefikURL != valid["SHIPYARD_TRAEFIK_URL"] {
 		t.Fatalf("valid config: %+v, %v", config, err)
 	}
 	for key, values := range map[string][]string{"SHIPYARD_EXECUTOR_ENABLED": {"", "yes", "TRUE"}, "SHIPYARD_WORKSPACE_ROOT": {"", "relative"}, "SHIPYARD_ALLOWED_REPOSITORIES": {"", "null", "[]", `["ssh://example.com/repo.git"]`, `["https://example.com/repo.git",null]`}, "SHIPYARD_DOCKER_HOST": {"", "tcp://localhost:2375", "unix://relative", "unix:///tmp/docker.sock?query", "unix:///tmp/docker.sock#fragment", "unix://user@/tmp/docker.sock"}} {
@@ -21,6 +21,19 @@ func TestExecutorIsDisabledUnlessExplicitlyConfigured(t *testing.T) {
 			valid[key] = value
 			if _, err := LoadConfig(read); err == nil {
 				t.Errorf("accepted invalid %s", key)
+			}
+		}
+		valid[key] = original
+	}
+	for key, values := range map[string][]string{
+		"SHIPYARD_ROUTES_DIR":  {"", "relative"},
+		"SHIPYARD_TRAEFIK_URL": {"", "http://localhost:8180", "https://127.0.0.1:8180", "http://example.com:8180", "http://127.0.0.1", "http://127.0.0.1:0", "http://127.0.0.1:8180/", "http://127.0.0.1:8180?x", "http://127.0.0.1:8180#x", "http://user@127.0.0.1:8180"},
+	} {
+		original := valid[key]
+		for _, value := range values {
+			valid[key] = value
+			if _, err := LoadConfig(read); err == nil {
+				t.Errorf("accepted invalid %s=%q", key, value)
 			}
 		}
 		valid[key] = original

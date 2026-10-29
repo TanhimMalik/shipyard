@@ -79,8 +79,8 @@ func TestReadinessUsesFreshPinnedObservationsAndLeavesRoutingPending(t *testing.
 		return deployments.Deployment{}, nil
 	}
 	w.store = store
-	if err := w.checkReadiness(t.Context(), claim, *deployment); err != nil {
-		t.Fatal(err)
+	if ready, err := w.checkReadiness(t.Context(), claim, *deployment); err != nil || ready == nil || ready.Deployment.ID != deployment.ID || ready.Instance.ID != strings.Repeat("c", 64) {
+		t.Fatalf("missing successful readiness handoff: %+v, %v", ready, err)
 	}
 	if strings.Join(calls, ",") != "inspect,probe,inspect,save" || deployment.Status != deployments.StatusHealthChecking || deployment.FinishedAt != nil || deployment.ReadinessPassed == nil || !*deployment.ReadinessPassed || *deployment.ReadinessAttempts != 3 || *deployment.ReadinessStatusCode != 204 || deployment.ReadinessCheckedAt.IsZero() {
 		t.Fatalf("readiness advanced routing or lost the actual result: calls=%v deployment=%+v", calls, deployment)
@@ -136,7 +136,7 @@ func TestReadinessFailureSavesResultBeforeCleaningAndFailing(t *testing.T) {
 				return fail(ctx, c, stage, reason)
 			}
 			w.store = store
-			if err := w.checkReadiness(t.Context(), claim, *deployment); err != nil || deployment.Status != deployments.StatusFailed || deployment.ReadinessPassed == nil || *deployment.ReadinessPassed || deployment.ReadinessStatusCode == nil || *deployment.ReadinessStatusCode != status {
+			if ready, err := w.checkReadiness(t.Context(), claim, *deployment); err != nil || ready != nil || deployment.Status != deployments.StatusFailed || deployment.ReadinessPassed == nil || *deployment.ReadinessPassed || deployment.ReadinessStatusCode == nil || *deployment.ReadinessStatusCode != status {
 				t.Fatalf("readiness failure lost its truthful outcome: %+v, %v", deployment, err)
 			}
 		})
@@ -205,7 +205,7 @@ func TestReadinessUncertaintyPreservesTheUnfinishedCandidate(t *testing.T) {
 				}
 				return workerTestReady(ctx, target)
 			})
-			if err := w.checkReadiness(t.Context(), claim, *deployment); !errors.Is(err, uncertain) {
+			if ready, err := w.checkReadiness(t.Context(), claim, *deployment); !errors.Is(err, uncertain) || ready != nil {
 				t.Fatalf("lost readiness uncertainty: %v", err)
 			}
 		})
@@ -229,7 +229,7 @@ func TestCanceledReadinessLeavesNoInventedObservation(t *testing.T) {
 		return deployments.Deployment{}, nil
 	}
 	w.store = store
-	if err := w.checkReadiness(ctx, claim, *deployment); !errors.Is(err, context.Canceled) || deployment.ReadinessPassed != nil {
+	if ready, err := w.checkReadiness(ctx, claim, *deployment); !errors.Is(err, context.Canceled) || ready != nil || deployment.ReadinessPassed != nil {
 		t.Fatalf("canceled readiness invented an outcome: %+v, %v", deployment, err)
 	}
 }
@@ -266,7 +266,7 @@ func TestStoppedCandidateBeforeReadinessDoesNotInventAProbe(t *testing.T) {
 			return *deployment, nil
 		}
 		w.store = store
-		if err := w.checkReadiness(t.Context(), claim, *deployment); err != nil || deployment.Status != deployments.StatusFailed || deployment.ReadinessPassed != nil {
+		if ready, err := w.checkReadiness(t.Context(), claim, *deployment); err != nil || ready != nil || deployment.Status != deployments.StatusFailed || deployment.ReadinessPassed != nil {
 			t.Fatalf("pre-probe failure invented readiness: %+v, %v", deployment, err)
 		}
 	}

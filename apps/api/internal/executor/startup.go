@@ -59,7 +59,7 @@ func (w *Worker) startup(ctx context.Context, claim deployments.Claim, deploymen
 }
 
 func startupSpec(deployment deployments.Deployment) (runtime.Spec, error) {
-	if (deployment.Status != deployments.StatusStarting && deployment.Status != deployments.StatusHealthChecking) || deployment.InstanceID == nil || deployment.ImageID == nil ||
+	if (deployment.Status != deployments.StatusStarting && deployment.Status != deployments.StatusHealthChecking && deployment.Status != deployments.StatusActivating) || deployment.InstanceID == nil || deployment.ImageID == nil ||
 		deployment.ImageReference == nil || deployment.CommitSHA == nil {
 		return runtime.Spec{}, errors.New("startup has incomplete persisted instance metadata")
 	}

@@ -62,7 +62,7 @@ func TestManagerPublishesOwnedRoutesAndReusesExactRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.HasPrefix(data, []byte("# shipyard-route-v1 ")) || !bytes.Contains(data, []byte("http://127.0.0.1:32123")) ||
+	if !bytes.HasPrefix(data, []byte("# shipyard-route-v2 ")) || !bytes.Contains(data, []byte("http://127.0.0.1:32123")) ||
 		!bytes.Contains(data, []byte(binding.ProjectID+".shipyard.localhost")) {
 		t.Fatalf("route lacks ownership, fixed loopback target, or stable host: %s", data)
 	}

@@ -92,7 +92,7 @@ func TestAsyncSourceOwnershipAPIAndRestartRecovery(t *testing.T) {
 	}
 	next := executorTestQueue(t, api.URL, projectID)
 	checkpoint := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool {
-		return d.Status == deployments.StatusHealthChecking && d.ReadinessPassed != nil && *d.ReadinessPassed
+		return d.Status == deployments.StatusRunning && d.ReadinessPassed != nil && *d.ReadinessPassed
 	})
 	if checkpoint.CommitSHA == nil || *checkpoint.CommitSHA != strings.Repeat("b", 40) || checkpoint.ImageID == nil || checkpoint.InstanceID == nil {
 		t.Fatalf("build checkpoint was not saved: %+v", checkpoint)
@@ -105,9 +105,12 @@ func TestAsyncSourceOwnershipAPIAndRestartRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopRecovery := executorTestRun(t, executorTestWorker(pool, nil))
-	recovered := executorTestWait(t, store, next.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed })
-	if recovered.CommitSHA == nil || *recovered.CommitSHA != strings.Repeat("b", 40) || recovered.ImageID == nil || *recovered.ImageID != *checkpoint.ImageID || recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusHealthChecking || recovered.ReadinessPassed == nil || !*recovered.ReadinessPassed {
-		t.Fatalf("restart discarded build history or failed the wrong stage: %+v", recovered)
+	recovered, err := store.Get(t.Context(), next.ID)
+	if err != nil || recovered.Status != deployments.StatusRunning || recovered.FailureStage != nil || recovered.ImageID == nil || *recovered.ImageID != *checkpoint.ImageID || recovered.ReadinessPassed == nil || !*recovered.ReadinessPassed {
+		t.Fatalf("restart changed a confirmed running deployment: %+v, %v", recovered, err)
+	}
+	if active, err := store.GetActiveRoute(t.Context(), next.ProjectID); err != nil || active.DeploymentID != next.ID || active.ContainerID != *instance.ContainerID {
+		t.Fatalf("confirmed active route was not saved: %+v, %v", active, err)
 	}
 	if err := stopRecovery(); err != nil {
 		t.Fatal(err)
@@ -125,7 +128,11 @@ func TestExecutorFetchesApprovedPublicGitThroughQueuedAPI(t *testing.T) {
 	}
 	pool := executorTestDatabase(t)
 	root := filepath.Join(t.TempDir(), "workspace")
-	worker, err := New(Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: []string{repository}, DockerHost: "unix:///tmp/shipyard-source-test.sock"}, pool)
+	routes := t.TempDir()
+	if err := os.Chmod(routes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: []string{repository}, DockerHost: "unix:///tmp/shipyard-source-test.sock", RoutesDirectory: routes, TraefikURL: "http://127.0.0.1:8180"}, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +190,7 @@ func TestExecutorFetchesApprovedPublicGitThroughQueuedAPI(t *testing.T) {
 
 func executorTestWorker(pool *pgxpool.Pool, fetcher fetcher) *Worker {
 	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher,
+		routes: &testRoutes{}, verifier: testVerifier{},
 		builder: testBuilder{
 			build: func(ctx context.Context, input builds.Input) (builds.Image, error) {
 				return workerTestImage(input.DeploymentID), nil

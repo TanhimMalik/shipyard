@@ -26,6 +26,7 @@ import (
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
 	"shipyard/apps/api/internal/health"
+	"shipyard/apps/api/internal/routing"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -47,7 +48,7 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 		t.Fatalf("fixture needs a Linux arm64/amd64 engine: OS=%s arch=%s error=%v", version.Os, version.Arch, err)
 	}
 	app := executorTestCompileApp(t, version.Arch)
-	for _, scenario := range []string{"running candidate and restart cleanup", "missing COPY source", "bad ENTRYPOINT", "readiness timeout"} {
+	for _, scenario := range []string{"running candidate survives restart", "missing COPY source", "bad ENTRYPOINT", "readiness timeout"} {
 		t.Run(scenario, func(t *testing.T) {
 			pool := executorTestDatabase(t)
 			store := deployments.NewStore(pool)
@@ -80,6 +81,13 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 			}))
 			worker.builder, worker.runtime = builder, manager
 			worker.readiness = executorTestReadiness(t)
+			var realRoutes *routing.Manager
+			var realVerifier *routing.Verifier
+			if scenario == "running candidate survives restart" && os.Getenv("SHIPYARD_TEST_TRAEFIK_BINARY") != "" {
+				realRoutes, realVerifier, _ = executorTestTraefik(t)
+				worker.routes, worker.verifier = realRoutes, realVerifier
+				worker.runtime = executorTestRelayRuntime(t, manager)
+			}
 			stop := executorTestRun(t, worker)
 			api := httptest.NewServer(deployments.NewHandler(store))
 			t.Cleanup(api.Close)
@@ -99,6 +107,15 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				defer cancel()
 				saved, err := store.Get(ctx, queued.ID)
+				if err == nil && realRoutes != nil {
+					if binding, err := realRoutes.Get(ctx, saved.ProjectID); err == nil {
+						if err := realRoutes.Remove(ctx, binding); err != nil {
+							t.Errorf("remove fixture route: %v", err)
+						}
+					} else if !errors.Is(err, routing.ErrNotFound) {
+						t.Errorf("read fixture route: %v", err)
+					}
+				}
 				if err == nil && saved.InstanceID != nil && saved.ImageID != nil {
 					spec := runtime.Spec{ProjectID: saved.ProjectID, DeploymentID: saved.ID, InstanceID: *saved.InstanceID, ImageID: *saved.ImageID, CommitSHA: sha, AppPort: saved.AppPort}
 					if instance, err := store.GetInstance(ctx, *saved.InstanceID); err == nil && instance.ContainerID != nil {
@@ -116,12 +133,12 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				}
 			})
 			saved := executorTestWait(t, store, queued.ID, func(d deployments.Deployment) bool {
-				return d.Status == deployments.StatusHealthChecking && d.ReadinessPassed != nil || d.Status == deployments.StatusFailed
+				return d.Status == deployments.StatusRunning || d.Status == deployments.StatusFailed
 			}, 45*time.Second)
 			if saved.CommitSHA == nil || *saved.CommitSHA != sha {
 				t.Fatalf("build lost source history: %+v", saved)
 			}
-			if scenario != "running candidate and restart cleanup" {
+			if scenario != "running candidate survives restart" {
 				saved = executorTestWait(t, store, queued.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed }, 15*time.Second)
 				stage, reason := deployments.StatusStarting, "Container startup failed."
 				if scenario == "missing COPY source" {
@@ -180,34 +197,42 @@ func TestExecutorBuildsAndStartsThroughQueuedAPI(t *testing.T) {
 				t.Fatalf("unexpected candidate HTTP: %q", body)
 			}
 			current, err := store.Get(t.Context(), saved.ID)
-			if err != nil || current.Status != deployments.StatusHealthChecking || current.FinishedAt != nil || current.ReadinessPassed == nil || !*current.ReadinessPassed || current.ReadinessStatusCode == nil || *current.ReadinessStatusCode != 200 || current.ReadinessAttempts == nil || *current.ReadinessAttempts < 1 || current.ReadinessCheckedAt == nil {
-				t.Fatalf("readiness did not retain a pending, unrouted result: %+v, %v", current, err)
+			if err != nil || current.Status != deployments.StatusRunning || current.FinishedAt == nil || current.ReadinessPassed == nil || !*current.ReadinessPassed || current.ReadinessStatusCode == nil || *current.ReadinessStatusCode != 200 || current.ReadinessAttempts == nil || *current.ReadinessAttempts < 1 || current.ReadinessCheckedAt == nil {
+				t.Fatalf("activation did not complete the verified deployment: %+v, %v", current, err)
 			}
-			if _, err := store.Create(t.Context(), current.ProjectID); !errors.Is(err, deployments.ErrAlreadyQueued) {
-				t.Fatalf("unrouted ready candidate released the unfinished slot: %v", err)
+			active, err := store.GetActiveRoute(t.Context(), current.ProjectID)
+			if err != nil || active.DeploymentID != current.ID || active.ContainerID != *instance.ContainerID || active.HostPort != *instance.HostPort {
+				t.Fatalf("actual active binding was not saved: %+v, %v", active, err)
+			}
+			if realVerifier != nil {
+				if err := realVerifier.Ready(t.Context(), routing.Binding(active), current.HealthPath); err != nil {
+					t.Fatalf("actual Docker app was not served through Traefik: %v", err)
+				}
 			}
 			if err := stop(); err != nil {
 				t.Fatal(err)
 			}
 			replacement := executorTestWorker(pool, nil)
 			replacement.builder, replacement.runtime = builder, manager
+			if realRoutes != nil {
+				replacement.routes, replacement.verifier = realRoutes, realVerifier
+			}
 			stopRecovery := executorTestRun(t, replacement)
-			recovered := executorTestWait(t, store, saved.ID, func(d deployments.Deployment) bool { return d.Status == deployments.StatusFailed }, 15*time.Second)
-			if recovered.FailureStage == nil || *recovered.FailureStage != deployments.StatusHealthChecking || recovered.ImageID == nil || *recovered.ImageID != *saved.ImageID || recovered.InstanceID == nil || *recovered.InstanceID != *saved.InstanceID || recovered.ReadinessPassed == nil || !*recovered.ReadinessPassed || !recovered.ReadinessCheckedAt.Equal(*current.ReadinessCheckedAt) {
-				t.Fatalf("restart lost startup history: %+v", recovered)
+			recovered, err := store.Get(t.Context(), saved.ID)
+			if err != nil || recovered.Status != deployments.StatusRunning || recovered.FailureStage != nil || recovered.ImageID == nil || *recovered.ImageID != *saved.ImageID || recovered.InstanceID == nil || *recovered.InstanceID != *saved.InstanceID {
+				t.Fatalf("restart changed a confirmed running app: %+v, %v", recovered, err)
 			}
 			if err := stopRecovery(); err != nil {
 				t.Fatal(err)
 			}
-			stopped, err := store.GetInstance(t.Context(), *saved.InstanceID)
-			if err != nil || stopped.ContainerID == nil || *stopped.ContainerID != *instance.ContainerID || stopped.Running == nil || *stopped.Running || stopped.ObservedStatus == nil || *stopped.ObservedStatus != "exited" || stopped.HostPort != nil {
-				t.Fatalf("restart did not persist stopped process: %+v, %v", stopped, err)
+			stillRunning, err := manager.Inspect(t.Context(), spec)
+			if err != nil || !stillRunning.Running || stillRunning.ID != *instance.ContainerID || stillRunning.HostPort != *instance.HostPort {
+				t.Fatalf("restart stopped or replaced the active container: %+v, %v", stillRunning, err)
 			}
-			if _, err := docker.ContainerInspect(t.Context(), *instance.ContainerID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
-				t.Fatalf("restart left candidate container: %v", err)
-			}
-			if _, err := docker.ImageInspect(t.Context(), reference); !errdefs.IsNotFound(err) {
-				t.Fatalf("restart left candidate image: %v", err)
+			if realVerifier != nil {
+				if err := realVerifier.Ready(t.Context(), routing.Binding(active), current.HealthPath); err != nil {
+					t.Fatalf("restart lost actual routed traffic: %v", err)
+				}
 			}
 		})
 	}

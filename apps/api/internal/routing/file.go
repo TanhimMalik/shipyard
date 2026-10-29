@@ -15,40 +15,59 @@ import (
 const maxConfigBytes = 16 << 10
 
 func (m *Manager) read(projectID string) (Binding, error) {
+	binding, _, err := m.readOwned(projectID)
+	return binding, err
+}
+
+func (m *Manager) readOwned(projectID string) (Binding, bool, error) {
 	name := routeName(projectID)
 	info, err := m.root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
-		return Binding{}, ErrNotFound
+		return Binding{}, false, ErrNotFound
 	}
 	if err != nil {
-		return Binding{}, fmt.Errorf("inspect route file: %w", err)
+		return Binding{}, false, fmt.Errorf("inspect route file: %w", err)
 	}
 	if !privateOwned(info, false) || info.Size() > maxConfigBytes {
-		return Binding{}, ErrNotOwned
+		return Binding{}, false, ErrNotOwned
 	}
 	file, err := m.root.Open(name)
 	if err != nil {
-		return Binding{}, fmt.Errorf("open route file: %w", err)
+		return Binding{}, false, fmt.Errorf("open route file: %w", err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		return Binding{}, ErrNotOwned
+		return Binding{}, false, ErrNotOwned
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
 	if err != nil {
-		return Binding{}, fmt.Errorf("read route file: %w", err)
+		return Binding{}, false, fmt.Errorf("read route file: %w", err)
 	}
 	header, _, found := bytes.Cut(data, []byte("\n"))
-	if !found || len(data) > maxConfigBytes || !bytes.HasPrefix(header, []byte(headerPrefix)) {
-		return Binding{}, ErrNotOwned
+	if !found || len(data) > maxConfigBytes {
+		return Binding{}, false, ErrNotOwned
+	}
+	legacy := bytes.HasPrefix(header, []byte(legacyHeaderPrefix))
+	prefix := headerPrefix
+	if legacy {
+		prefix = legacyHeaderPrefix
+	}
+	if !bytes.HasPrefix(header, []byte(prefix)) {
+		return Binding{}, false, ErrNotOwned
 	}
 	var binding Binding
-	if err := json.Unmarshal(header[len(headerPrefix):], &binding); err != nil || !validBinding(binding) ||
-		binding.ProjectID != projectID || !bytes.Equal(data, render(binding)) {
-		return Binding{}, ErrNotOwned
+	if err := json.Unmarshal(header[len(prefix):], &binding); err != nil || !validBinding(binding) || binding.ProjectID != projectID {
+		return Binding{}, false, ErrNotOwned
 	}
-	return binding, nil
+	expected := render(binding)
+	if legacy {
+		expected = renderLegacy(binding)
+	}
+	if !bytes.Equal(data, expected) {
+		return Binding{}, false, ErrNotOwned
+	}
+	return binding, legacy, nil
 }
 
 func (m *Manager) write(ctx context.Context, binding Binding) error {

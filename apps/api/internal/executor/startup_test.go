@@ -10,6 +10,7 @@ import (
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
 	"shipyard/apps/api/internal/health"
+	"shipyard/apps/api/internal/routing"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -224,8 +225,8 @@ func TestAmbiguousCreationAndCancellationRemainRecoverable(t *testing.T) {
 	}
 }
 
-func TestLeaseLossDuringStartupOrReadinessCancelsBeforeOwnershipRelease(t *testing.T) {
-	for _, phase := range []string{"startup", "readiness"} {
+func TestLeaseLossDuringStartupReadinessOrActivationCancelsBeforeOwnershipRelease(t *testing.T) {
+	for _, phase := range []string{"startup", "readiness", "activation"} {
 		t.Run(phase, func(t *testing.T) {
 			claim := workerTestClaim()
 			sha := strings.Repeat("a", 40)
@@ -254,9 +255,13 @@ func TestLeaseLossDuringStartupOrReadinessCancelsBeforeOwnershipRelease(t *testi
 				got.Status = deployments.StatusHealthChecking
 				return got, nil
 			}
-			store.readiness = func(context.Context, deployments.Claim, string, deployments.ReadinessObservation) (deployments.Deployment, error) {
-				t.Fatal("persisted canceled readiness")
-				return deployment, nil
+			store.readiness = func(_ context.Context, _ deployments.Claim, _ string, observed deployments.ReadinessObservation) (deployments.Deployment, error) {
+				if phase != "activation" {
+					t.Fatal("persisted canceled readiness")
+				}
+				got := deployment
+				got.Status, got.ReadinessPassed = deployments.StatusHealthChecking, &observed.Passed
+				return got, nil
 			}
 			store.fail = func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error) {
 				t.Fatal("terminalized canceled startup")
@@ -283,6 +288,18 @@ func TestLeaseLossDuringStartupOrReadinessCancelsBeforeOwnershipRelease(t *testi
 					close(exited)
 					return health.Result{}, ctx.Err()
 				})
+			}
+			if phase == "activation" {
+				w.runtime = testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+					return workerTestContainer(spec, true), nil
+				}}
+				w.readiness, w.routes = probeFunc(workerTestReady), &testRoutes{}
+				w.verifier = testVerifier{ready: func(ctx context.Context, _ routing.Binding, _ string) error {
+					close(entered)
+					<-ctx.Done()
+					close(exited)
+					return ctx.Err()
+				}}
 			}
 			w.acquire = func(context.Context) (lease, error) {
 				return testLease{check: func(ctx context.Context) error {

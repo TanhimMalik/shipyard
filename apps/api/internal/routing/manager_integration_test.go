@@ -44,6 +44,10 @@ func TestManagerRoutesThroughTraefik(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 	backend := func(marker string) *httptest.Server {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set(MarkerHeader, "app-supplied-marker")
+			if r.URL.Path == "/missing" {
+				w.WriteHeader(http.StatusNotFound)
+			}
 			_, _ = io.WriteString(w, marker+" "+r.URL.RequestURI())
 		}))
 		t.Cleanup(server.Close)
@@ -78,10 +82,38 @@ func TestManagerRoutesThroughTraefik(t *testing.T) {
 	}
 	proxy := routingIntegrationStart(t, binary, directory, address)
 	proxy.waitResponse(t, address, host, http.StatusNotFound, "")
+	verifier, err := NewVerifier(VerifierConfig{URL: "http://" + address, Timeout: 3 * time.Second, RequestTimeout: 200 * time.Millisecond, Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Restored(t.Context(), old.ProjectID, nil); err != nil {
+		t.Fatalf("empty Traefik route was not observed: %v", err)
+	}
 	if err := manager.Put(t.Context(), old, nil); err != nil {
 		t.Fatal(err)
 	}
 	proxy.waitResponse(t, address, host, http.StatusOK, "old /app?from=route")
+	if err := verifier.Ready(t.Context(), old, "/ready"); err != nil {
+		t.Fatalf("proxy did not identify the full old binding: %v", err)
+	}
+	marker, _ := Marker(old)
+	routingIntegrationAssertMarker(t, address, host, "/missing", http.StatusNotFound, marker)
+	oldBackend.Close()
+	proxy.waitResponse(t, address, host, http.StatusBadGateway, "")
+	routingIntegrationAssertMarker(t, address, host, "/", http.StatusBadGateway, marker)
+	if err := verifier.Restored(t.Context(), old.ProjectID, &old); err != nil {
+		t.Fatalf("old route selection was confused with backend health: %v", err)
+	}
+	shortVerifier, err := NewVerifier(VerifierConfig{URL: "http://" + address, Timeout: 100 * time.Millisecond, RequestTimeout: 50 * time.Millisecond, Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shortVerifier.Ready(t.Context(), old, "/ready"); !errors.Is(err, ErrNotObserved) {
+		t.Fatalf("unhealthy old backend was reported ready: %v", err)
+	}
+	if err := shortVerifier.Restored(t.Context(), old.ProjectID, nil); !errors.Is(err, ErrNotObserved) {
+		t.Fatalf("a matched broken route was reported absent: %v", err)
+	}
 	proxy.waitResponse(t, address, host+".other", http.StatusNotFound, "")
 	if err := manager.Put(t.Context(), other, nil); err != nil {
 		t.Fatal(err)
@@ -91,6 +123,9 @@ func TestManagerRoutesThroughTraefik(t *testing.T) {
 		t.Fatal(err)
 	}
 	proxy.waitResponse(t, address, host, http.StatusOK, "new /app?from=route")
+	if err := verifier.Ready(t.Context(), next, "/ready"); err != nil {
+		t.Fatalf("proxy did not identify the replacement binding: %v", err)
+	}
 	if err := manager.Remove(t.Context(), old); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale cleanup accepted: %v", err)
 	}
@@ -104,7 +139,33 @@ func TestManagerRoutesThroughTraefik(t *testing.T) {
 		t.Fatal(err)
 	}
 	proxy.waitResponse(t, address, host, http.StatusNotFound, "")
+	if err := verifier.Restored(t.Context(), next.ProjectID, nil); err != nil {
+		t.Fatalf("removed route was not observed: %v", err)
+	}
 	proxy.waitResponse(t, address, otherHost, http.StatusOK, "other /app?from=route")
+}
+
+func routingIntegrationAssertMarker(t *testing.T, address, host, path string, status int, marker string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = host
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	values := response.Header.Values(MarkerHeader)
+	if response.StatusCode != status || len(values) != 1 || values[0] != marker {
+		t.Fatalf("Traefik did not override app marker on status%d: status=%d marker=%v", status, response.StatusCode, values)
+	}
 }
 
 func routingIntegrationPort(t *testing.T, address string) int {

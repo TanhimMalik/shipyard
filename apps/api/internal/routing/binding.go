@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,9 +42,46 @@ func Hostname(projectID string) (string, error) {
 	return projectID + ".shipyard.localhost", nil
 }
 
-const headerPrefix = "# shipyard-route-v1 "
+const (
+	MarkerHeader       = "X-Shipyard-Route"
+	headerPrefix       = "# shipyard-route-v2 "
+	legacyHeaderPrefix = "# shipyard-route-v1 "
+)
+
+// Marker identifies the whole binding, including the exact container and port.
+func Marker(binding Binding) (string, error) {
+	if !validBinding(binding) {
+		return "", ErrInvalidBinding
+	}
+	data, _ := json.Marshal(binding)
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 func render(binding Binding) []byte {
+	metadata, _ := json.Marshal(binding)
+	hostname, _ := Hostname(binding.ProjectID)
+	marker, _ := Marker(binding)
+	name := "shipyard-" + binding.ProjectID
+	return fmt.Appendf(nil, `%s%s
+[http.routers.%s]
+  entryPoints = ["web"]
+  rule = "Host(%s)"
+  service = "%s"
+  middlewares = ["%s-identity"]
+
+[http.services.%s.loadBalancer]
+  passHostHeader = true
+  [[http.services.%s.loadBalancer.servers]]
+    url = "http://127.0.0.1:%d"
+
+[http.middlewares.%s-identity.headers.customResponseHeaders]
+  %s = "%s"
+`, headerPrefix, metadata, name, "`"+hostname+"`", name, name, name, name, binding.HostPort, name, MarkerHeader, marker)
+}
+
+// Keep exact v1 documents readable so a retry can upgrade them safely.
+func renderLegacy(binding Binding) []byte {
 	metadata, _ := json.Marshal(binding)
 	hostname, _ := Hostname(binding.ProjectID)
 	name := "shipyard-" + binding.ProjectID
@@ -56,7 +95,7 @@ func render(binding Binding) []byte {
   passHostHeader = true
   [[http.services.%s.loadBalancer.servers]]
     url = "http://127.0.0.1:%d"
-`, headerPrefix, metadata, name, "`"+hostname+"`", name, name, name, binding.HostPort)
+`, legacyHeaderPrefix, metadata, name, "`"+hostname+"`", name, name, name, binding.HostPort)
 }
 
 func routeName(projectID string) string { return "shipyard-" + projectID + ".toml" }

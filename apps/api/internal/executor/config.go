@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"shipyard/apps/api/internal/gitinput"
+	"shipyard/apps/api/internal/routing"
 )
 
 type Config struct {
@@ -14,6 +17,8 @@ type Config struct {
 	WorkspaceRoot       string
 	AllowedRepositories []string
 	DockerHost          string
+	RoutesDirectory     string
+	TraefikURL          string
 }
 
 func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
@@ -43,5 +48,50 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil || u.Scheme != "unix" || u.Host != "" || u.User != nil || !filepath.IsAbs(u.Path) || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return Config{}, errors.New("SHIPYARD_DOCKER_HOST must be an explicit absolute Unix socket URL")
 	}
-	return Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: repositories, DockerHost: host}, nil
+	routes, _ := lookup("SHIPYARD_ROUTES_DIR")
+	if !filepath.IsAbs(routes) || overlappingDirectories(root, routes) {
+		return Config{}, errors.New("SHIPYARD_ROUTES_DIR must be an absolute private directory separate from the source workspace")
+	}
+	proxy, _ := lookup("SHIPYARD_TRAEFIK_URL")
+	if err := routing.ValidateProxyURL(proxy); err != nil {
+		return Config{}, errors.New("SHIPYARD_TRAEFIK_URL must be an explicit loopback HTTP origin with a port")
+	}
+	return Config{Enabled: true, WorkspaceRoot: root, AllowedRepositories: repositories, DockerHost: host, RoutesDirectory: routes, TraefikURL: proxy}, nil
+}
+
+func overlappingDirectories(left, right string) bool {
+	contains := func(parent, child string) bool {
+		relative, err := filepath.Rel(parent, child)
+		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	return contains(left, right) || contains(right, left)
+}
+
+// Compare actual directory identities as well as spelling, including symlink
+// ancestors and case aliases on filesystems that treat names case-insensitively.
+func existingDirectoriesOverlap(left, right string) (bool, error) {
+	contains := func(parent, child string) (bool, error) {
+		info, err := os.Stat(parent)
+		if err != nil {
+			return false, err
+		}
+		for {
+			current, err := os.Stat(child)
+			if err != nil {
+				return false, err
+			}
+			if os.SameFile(info, current) {
+				return true, nil
+			}
+			next := filepath.Dir(child)
+			if next == child {
+				return false, nil
+			}
+			child = next
+		}
+	}
+	if overlap, err := contains(left, right); overlap || err != nil {
+		return overlap, err
+	}
+	return contains(right, left)
 }

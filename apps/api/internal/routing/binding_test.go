@@ -55,3 +55,27 @@ func TestManagerRejectsInvalidBindingsBeforePublication(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkerIdentifiesEveryPartOfTheBinding(t *testing.T) {
+	binding := routingTestBinding()
+	marker, err := Marker(binding)
+	if err != nil || marker != "1256d61c9699c82b3e0900e854a0e9c574b79cc9fa4f8514f13c8ace1228f678" {
+		t.Fatalf("stable binding marker: %q, %v", marker, err)
+	}
+	for _, change := range []func(*Binding){
+		func(b *Binding) { b.ProjectID = b.DeploymentID },
+		func(b *Binding) { b.DeploymentID = b.InstanceID },
+		func(b *Binding) { b.InstanceID = b.ProjectID },
+		func(b *Binding) { b.ContainerID = strings.Repeat("d", 64) },
+		func(b *Binding) { b.HostPort++ },
+	} {
+		next := binding
+		change(&next)
+		if got, err := Marker(next); err != nil || got == marker {
+			t.Fatalf("marker did not identify changed binding: %+v, %q, %v", next, got, err)
+		}
+	}
+	if _, err := Marker(Binding{}); !errors.Is(err, ErrInvalidBinding) {
+		t.Fatalf("invalid binding has a marker: %v", err)
+	}
+}

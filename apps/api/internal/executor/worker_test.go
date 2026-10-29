@@ -6,12 +6,14 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
 	"shipyard/apps/api/internal/health"
+	"shipyard/apps/api/internal/routing"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -91,6 +93,7 @@ func workerTestContainer(spec runtime.Spec, running bool) runtime.Instance {
 type testStore struct {
 	claim       func(context.Context) (deployments.Claim, error)
 	interrupted func(context.Context) (deployments.Claim, error)
+	take        func(context.Context, deployments.Claim) (deployments.Claim, error)
 	record      func(context.Context, deployments.Claim, string) (deployments.Deployment, error)
 	beginBuild  func(context.Context, deployments.Claim) (deployments.Deployment, error)
 	beginStart  func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
@@ -99,6 +102,10 @@ type testStore struct {
 	instance    func(context.Context, string) (deployments.RuntimeInstance, error)
 	observe     func(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	fail        func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
+	active      func(context.Context, string) (deployments.RouteBinding, error)
+	activate    func(context.Context, deployments.Claim, string, int) (deployments.Activation, error)
+	confirm     func(context.Context, deployments.Claim, deployments.RouteBinding) (deployments.Deployment, error)
+	abort       func(context.Context, deployments.Claim, *deployments.RouteBinding, string) (deployments.Deployment, error)
 }
 
 func (s testStore) ClaimNext(ctx context.Context) (deployments.Claim, error) {
@@ -112,6 +119,36 @@ func (s testStore) NextInterrupted(ctx context.Context) (deployments.Claim, erro
 		return s.interrupted(ctx)
 	}
 	return deployments.Claim{}, deployments.ErrNoInterruptedDeployments
+}
+func (s testStore) TakeInterrupted(ctx context.Context, claim deployments.Claim) (deployments.Claim, error) {
+	if s.take != nil {
+		return s.take(ctx, claim)
+	}
+	return claim, nil
+}
+func (s testStore) GetActiveRoute(ctx context.Context, projectID string) (deployments.RouteBinding, error) {
+	if s.active != nil {
+		return s.active(ctx, projectID)
+	}
+	return deployments.RouteBinding{}, deployments.ErrActiveRouteNotFound
+}
+func (s testStore) BeginActivation(ctx context.Context, claim deployments.Claim, id string, port int) (deployments.Activation, error) {
+	if s.activate != nil {
+		return s.activate(ctx, claim, id, port)
+	}
+	d := workerTestStarting(claim, strings.Repeat("a", 40))
+	return deployments.Activation{Target: deployments.RouteBinding{ProjectID: claim.ProjectID, DeploymentID: claim.ID, InstanceID: *d.InstanceID, ContainerID: id, HostPort: port}}, nil
+}
+func (s testStore) ConfirmActivation(ctx context.Context, claim deployments.Claim, binding deployments.RouteBinding) (deployments.Deployment, error) {
+	if s.confirm != nil {
+		return s.confirm(ctx, claim, binding)
+	}
+	d := workerTestStarting(claim, strings.Repeat("a", 40))
+	d.Status = deployments.StatusRunning
+	return d, nil
+}
+func (s testStore) AbortActivation(ctx context.Context, claim deployments.Claim, previous *deployments.RouteBinding, reason string) (deployments.Deployment, error) {
+	return s.abort(ctx, claim, previous, reason)
 }
 func (s testStore) RecordSourceCommit(ctx context.Context, claim deployments.Claim, sha string) (deployments.Deployment, error) {
 	return s.record(ctx, claim, sha)
@@ -173,6 +210,81 @@ func workerTestReady(context.Context, health.Target) (health.Result, error) {
 	return health.Result{Attempts: 1, StatusCode: 200, CheckedAt: time.Now().UTC()}, nil
 }
 
+type testRoutes struct {
+	mu       sync.Mutex
+	bindings map[string]routing.Binding
+	get      func(context.Context, string) (routing.Binding, error)
+	put      func(context.Context, routing.Binding, *routing.Binding) error
+	remove   func(context.Context, routing.Binding) error
+}
+
+func (r *testRoutes) Get(ctx context.Context, projectID string) (routing.Binding, error) {
+	if r.get != nil {
+		return r.get(ctx, projectID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if binding, ok := r.bindings[projectID]; ok {
+		return binding, nil
+	}
+	return routing.Binding{}, routing.ErrNotFound
+}
+func (r *testRoutes) Put(ctx context.Context, next routing.Binding, previous *routing.Binding) error {
+	if r.put != nil {
+		return r.put(ctx, next, previous)
+	}
+	return r.putDefault(next, previous)
+}
+func (r *testRoutes) putDefault(next routing.Binding, previous *routing.Binding) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bindings == nil {
+		r.bindings = make(map[string]routing.Binding)
+	}
+	current, found := r.bindings[next.ProjectID]
+	if found && current == next {
+		return nil
+	}
+	if found && (previous == nil || current != *previous) || !found && previous != nil {
+		return routing.ErrConflict
+	}
+	r.bindings[next.ProjectID] = next
+	return nil
+}
+func (r *testRoutes) Remove(ctx context.Context, expected routing.Binding) error {
+	if r.remove != nil {
+		return r.remove(ctx, expected)
+	}
+	return r.removeDefault(expected)
+}
+func (r *testRoutes) removeDefault(expected routing.Binding) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current, found := r.bindings[expected.ProjectID]; found && current != expected {
+		return routing.ErrConflict
+	}
+	delete(r.bindings, expected.ProjectID)
+	return nil
+}
+
+type testVerifier struct {
+	ready    func(context.Context, routing.Binding, string) error
+	restored func(context.Context, string, *routing.Binding) error
+}
+
+func (v testVerifier) Ready(ctx context.Context, binding routing.Binding, path string) error {
+	if v.ready != nil {
+		return v.ready(ctx, binding, path)
+	}
+	return nil
+}
+func (v testVerifier) Restored(ctx context.Context, projectID string, previous *routing.Binding) error {
+	if v.restored != nil {
+		return v.restored(ctx, projectID, previous)
+	}
+	return nil
+}
+
 func workerTestImage(id string) builds.Image {
 	return builds.Image{Reference: "shipyard/deployments:" + id + "-" + strings.ReplaceAll(id, "-", ""), ID: "sha256:" + strings.Repeat("b", 64)}
 }
@@ -209,7 +321,7 @@ func TestBuildPipelineUsesSnapshotAndStopsOnStorageUncertainty(t *testing.T) {
 				}
 				return claim.Deployment, nil
 			}
-			w := &Worker{readiness: probeFunc(workerTestReady), runtime: testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+			w := &Worker{routes: &testRoutes{}, verifier: testVerifier{}, readiness: probeFunc(workerTestReady), runtime: testRuntime{inspect: func(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
 				return workerTestContainer(spec, true), nil
 			}}, fetcher: fetchFunc(func(ctx context.Context, repository, branch string) (*source.Checkout, error) {
 				calls = append(calls, "fetch")
@@ -251,7 +363,10 @@ func TestBuildPipelineUsesSnapshotAndStopsOnStorageUncertainty(t *testing.T) {
 					if !observed.Passed {
 						t.Fatal("running candidate failed fake readiness")
 					}
-					return claim.Deployment, nil
+					d := workerTestStarting(claim, sha)
+					d.Status = deployments.StatusHealthChecking
+					d.ReadinessPassed = &observed.Passed
+					return d, nil
 				},
 			}, builder: testBuilder{build: func(ctx context.Context, input builds.Input) (builds.Image, error) {
 				calls = append(calls, "build")

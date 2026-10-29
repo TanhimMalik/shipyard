@@ -6,12 +6,10 @@ Linux host.
 
 It's still in development. Project screens and the local API work. The optional
 worker can fetch approved repositories, build their Dockerfiles, start containers,
-check HTTP readiness, and save the observed state. Passed checks stay in
-`HEALTH_CHECKING` until routing is implemented. UI deployment controls and remote
-admin access also come next.
+check HTTP readiness, and activate verified Traefik routes. UI deployment controls
+and remote admin access come next.
 
-The Traefik adapter and persisted activation contract are tested separately;
-see [local routing](docs/routing.md). Connecting activation to the worker is next.
+See [local routing](docs/routing.md) for the native-host setup and activation behavior.
 
 ## Run locally
 
@@ -59,6 +57,8 @@ The worker is off by default. Set these before starting the API to enable it:
 - `SHIPYARD_ALLOWED_REPOSITORIES`: a JSON array of exact approved HTTPS Git URLs.
 - `SHIPYARD_DOCKER_HOST`: an explicit local Unix socket URL, such as
   `unix:///var/run/docker.sock`. The CLI context and ambient `DOCKER_HOST` are ignored.
+- `SHIPYARD_ROUTES_DIR`: an existing private directory, separate from the source workspace.
+- `SHIPYARD_TRAEFIK_URL`: the loopback HTTP listener, such as `http://127.0.0.1:8180`.
 
 Use Linux Docker Engine 28+ with BuildKit. One worker processes one attempt at a
 time, using a dedicated PostgreSQL session lock. It needs a direct database
@@ -71,14 +71,16 @@ this is for approved, controlled repositories, not hostile code.
 Readiness probes use the Docker host's loopback port and configured path. They
 accept HTTP 2xx, retry for up to 30 seconds by default, and reject redirects.
 The worker verifies the same container and port before and after probing, then
-saves the final result. A passed check does not activate a route.
+saves the final result. Activation also verifies the exact route identity through
+Traefik and rechecks the container before recording `RUNNING`.
 
 Startup failures clean up verified owned resources before recording failure.
 Uncertain Docker or database results preserve the unfinished attempt for recovery.
 On restart, the worker cleans interrupted source, build, startup, and readiness
-attempts; it does not resume them. Later lifecycle stages are not handled yet. Abrupt crashes
-can leave source directories or late Docker resources requiring manual cleanup
-while the worker is stopped. Build cache is retained.
+attempts; it does not resume them. Unresolved activation stops recovery for inspection.
+Confirmed routes remain in place; automatic app recovery and old-instance retirement
+come later. Abrupt crashes can leave source directories or late Docker resources
+requiring manual cleanup while the worker is stopped. Build cache is retained.
 
 ## Vercel
 

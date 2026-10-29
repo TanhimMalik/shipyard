@@ -66,13 +66,16 @@ func (m *Manager) Put(ctx context.Context, next Binding, expected *Binding) erro
 		return err
 	}
 	defer unlock()
-	current, err := m.read(next.ProjectID)
+	current, legacy, err := m.readOwned(next.ProjectID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	if err == nil && current == next {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if legacy {
+			return m.write(ctx, next)
 		}
 		return m.syncDirectory()
 	}

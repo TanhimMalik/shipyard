@@ -11,6 +11,7 @@ import (
 	"shipyard/apps/api/internal/builds"
 	"shipyard/apps/api/internal/deployments"
 	"shipyard/apps/api/internal/health"
+	"shipyard/apps/api/internal/routing"
 	"shipyard/apps/api/internal/runtime"
 	"shipyard/apps/api/internal/source"
 )
@@ -18,11 +19,16 @@ import (
 type store interface {
 	ClaimNext(context.Context) (deployments.Claim, error)
 	NextInterrupted(context.Context) (deployments.Claim, error)
+	TakeInterrupted(context.Context, deployments.Claim) (deployments.Claim, error)
 	RecordSourceCommit(context.Context, deployments.Claim, string) (deployments.Deployment, error)
 	BeginBuild(context.Context, deployments.Claim) (deployments.Deployment, error)
 	BeginStart(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
 	BeginHealthCheck(context.Context, deployments.Claim) (deployments.Deployment, error)
 	RecordReadiness(context.Context, deployments.Claim, string, deployments.ReadinessObservation) (deployments.Deployment, error)
+	GetActiveRoute(context.Context, string) (deployments.RouteBinding, error)
+	BeginActivation(context.Context, deployments.Claim, string, int) (deployments.Activation, error)
+	ConfirmActivation(context.Context, deployments.Claim, deployments.RouteBinding) (deployments.Deployment, error)
+	AbortActivation(context.Context, deployments.Claim, *deployments.RouteBinding, string) (deployments.Deployment, error)
 	GetInstance(context.Context, string) (deployments.RuntimeInstance, error)
 	RecordInstance(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	FailExecution(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
@@ -49,12 +55,25 @@ type readinessChecker interface {
 	Wait(context.Context, health.Target) (health.Result, error)
 }
 
+type routeManager interface {
+	Get(context.Context, string) (routing.Binding, error)
+	Put(context.Context, routing.Binding, *routing.Binding) error
+	Remove(context.Context, routing.Binding) error
+}
+
+type routeVerifier interface {
+	Ready(context.Context, routing.Binding, string) error
+	Restored(context.Context, string, *routing.Binding) error
+}
+
 type Worker struct {
 	store         store
 	fetcher       fetcher
 	builder       builder
 	runtime       containerRuntime
 	readiness     readinessChecker
+	routes        routeManager
+	verifier      routeVerifier
 	close         func() error
 	acquire       func(context.Context) (lease, error)
 	pollInterval  time.Duration
@@ -84,8 +103,25 @@ func New(config Config, pool *pgxpool.Pool) (*Worker, error) {
 		_ = containers.Close()
 		return nil, err
 	}
-	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, runtime: containers, readiness: checks,
-		close:        func() error { return errors.Join(imageBuilder.Close(), containers.Close()) },
+	routes, err := routing.NewManager(routing.Config{Directory: config.RoutesDirectory})
+	if err != nil {
+		_ = imageBuilder.Close()
+		_ = containers.Close()
+		return nil, err
+	}
+	proxy, err := routing.NewVerifier(routing.VerifierConfig{URL: config.TraefikURL})
+	overlap, pathErr := existingDirectoriesOverlap(config.WorkspaceRoot, config.RoutesDirectory)
+	if err == nil && (pathErr != nil || overlap) {
+		err = errors.New("source workspace and route directory must be separate")
+	}
+	if err != nil {
+		_ = imageBuilder.Close()
+		_ = containers.Close()
+		_ = routes.Close()
+		return nil, err
+	}
+	return &Worker{store: deployments.NewStore(pool), fetcher: fetcher, builder: imageBuilder, runtime: containers, readiness: checks, routes: routes, verifier: proxy,
+		close:        func() error { return errors.Join(imageBuilder.Close(), containers.Close(), routes.Close()) },
 		acquire:      func(ctx context.Context) (lease, error) { return acquireLease(ctx, pool) },
 		pollInterval: time.Second, checkInterval: time.Second}, nil
 }
@@ -183,6 +219,15 @@ func (w *Worker) recover(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read interrupted attempt: %w", err)
 		}
+		takeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		claim, err = w.store.TakeInterrupted(takeCtx, claim)
+		cancel()
+		if errors.Is(err, deployments.ErrInvalidTransition) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("take interrupted attempt: %w", err)
+		}
 		if err := w.cleanInterrupted(ctx, claim); err != nil {
 			return err
 		}
@@ -262,5 +307,9 @@ func (w *Worker) execute(ctx context.Context, claim deployments.Claim) (resultEr
 	if err != nil || !started {
 		return err
 	}
-	return w.checkReadiness(ctx, claim, deployment)
+	ready, err := w.checkReadiness(ctx, claim, deployment)
+	if err != nil || ready == nil {
+		return err
+	}
+	return w.activate(ctx, claim, *ready)
 }

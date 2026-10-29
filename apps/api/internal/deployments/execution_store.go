@@ -22,6 +22,7 @@ var (
 
 // NextInterrupted is only used after acquiring exclusive executor ownership.
 // QUEUED attempts have never started and remain eligible for normal claiming.
+// Its snapshot must be taken with TakeInterrupted before cleanup can begin.
 func (s *PostgresStore) NextInterrupted(ctx context.Context) (Claim, error) {
 	var claim Claim
 	deployment, err := scanDeployment(s.pool.QueryRow(ctx, `
@@ -33,6 +34,28 @@ func (s *PostgresStore) NextInterrupted(ctx context.Context) (Claim, error) {
 	}
 	if err != nil {
 		return Claim{}, fmt.Errorf("read interrupted deployment: %w", err)
+	}
+	claim.Deployment = deployment
+	return claim, nil
+}
+
+// TakeInterrupted fences the previous owner before restart cleanup. The caller
+// must hold the executor lease. A changed stage or token requires a fresh read;
+// cleanup must never continue using the stale snapshot.
+func (s *PostgresStore) TakeInterrupted(ctx context.Context, previous Claim) (Claim, error) {
+	if !executionStage(previous.Status) && previous.Status != StatusActivating {
+		return Claim{}, ErrInvalidExecution
+	}
+	var claim Claim
+	deployment, err := scanDeployment(s.pool.QueryRow(ctx, `
+		UPDATE deployments SET claim_token = gen_random_uuid(), updated_at = now()
+		WHERE id = $1 AND claim_token = $2 AND status = $3
+		RETURNING `+deploymentColumns+`, claim_token::text`, previous.ID, previous.Token, previous.Status), &claim.Token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Claim{}, ErrInvalidTransition
+	}
+	if err != nil {
+		return Claim{}, fmt.Errorf("take interrupted deployment: %w", err)
 	}
 	claim.Deployment = deployment
 	return claim, nil

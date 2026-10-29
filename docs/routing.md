@@ -53,6 +53,13 @@ rename or deletion can leave the change published; inspect the current binding
 before retrying. Calls honor cancellation while waiting for ownership and before
 mutation, but cannot interrupt an in-progress local filesystem syscall.
 
+The worker holds a separate coordinator lock across the whole switch or recovery,
+including proxy verification and database confirmation. Recovery waits for this
+lock before taking the claim from the previous worker. Both locks are local to
+the route directory and release when their process exits. Stop older engine
+binaries before upgrading: versions without the coordinator lock cannot cooperate
+with this recovery protocol. Keep the lock files in place.
+
 A successful write means the config is saved. Traefik reloads asynchronously.
 The worker polls the saved health path through the loopback listener, using the
 project hostname and listener port as the request Host. It requires HTTP 2xx and
@@ -86,11 +93,23 @@ If confirmation loses its database response, read `GetActivation` and
 `GetActiveRoute` before acting. A completed confirmation clears ownership, so
 replaying it with the released claim is rejected. Recovery atomically changes the
 claim token before cleaning interrupted work, fencing the old owner from starting
-activation on a stale snapshot. Until route-aware restart recovery is implemented,
-an interrupted `ACTIVATING` attempt stops startup for inspection and its resources
-remain untouched. Confirmed routes and containers remain in place across API
-restarts; a reconciler does not restore crashed apps yet. Migrations refuse to
-discard activation history on downgrade.
+activation on a stale snapshot.
+
+On restart, an interrupted `ACTIVATING` attempt reads its saved intent, the active
+pointer, and the current route file. If the target is published, recovery rechecks
+the pinned container and port, verifies the target through Traefik, then confirms
+it. An unusable target restores the previous route before candidate cleanup and
+failure. If the previous route is already saved, recovery verifies it and finishes
+the abort without publishing the candidate again. A first deployment uses route
+absence in place of a previous binding. This resolves current verified state;
+an unrecorded decision from the old process cannot be reconstructed.
+
+Each attempt has a 90-second recovery budget. Unexpected files, inconsistent saved
+state, unavailable services, or uncertain outcomes stop startup with the attempt
+and remaining resources preserved. After restoring service, another restart can
+finish recovery. Confirmed routes and containers remain in place across API
+restarts; a reconciler does not restore crashed apps yet. Old-instance retirement
+also comes later. Migrations refuse to discard activation history on downgrade.
 
 ## Local access and verification
 
@@ -103,7 +122,9 @@ Set `SHIPYARD_TEST_TRAEFIK_BINARY` to an absolute native executable path when
 running `go test -race -tags=integration ./internal/routing`. Tests verify actual
 HTTP routing, hostname isolation, replacement, stale cleanup, removal, and
 configuration loading after a Traefik restart. Executor integration also checks
-saved activation, failed-route rollback, and release of the deployment slot.
+saved activation, failed-route rollback, interrupted switches, recovery after a
+proxy outage, and release of the deployment slot. Lock tests check serialization
+between processes and release after a process crash.
 Tests use explicit loopback connections, independently of local DNS.
 
 On macOS with Colima, the Docker host is the Linux VM. Native Mac Traefik cannot

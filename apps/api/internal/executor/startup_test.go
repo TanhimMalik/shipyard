@@ -18,7 +18,7 @@ import (
 func startupTestWorker(t *testing.T, claim deployments.Claim, deployment deployments.Deployment) (*Worker, *deployments.RuntimeInstance) {
 	t.Helper()
 	instance := &deployments.RuntimeInstance{ID: *deployment.InstanceID, DeploymentID: claim.ID}
-	w := &Worker{runtime: testRuntime{}, builder: testBuilder{cleanup: func(context.Context, builds.Input, string) error { return nil }}}
+	w := &Worker{routes: &testRoutes{}, runtime: testRuntime{}, builder: testBuilder{cleanup: func(context.Context, builds.Input, string) error { return nil }}}
 	w.store = testStore{
 		instance: func(context.Context, string) (deployments.RuntimeInstance, error) { return *instance, nil },
 		observe: func(ctx context.Context, got deployments.Claim, id string, observed deployments.Observation) (deployments.RuntimeInstance, error) {

@@ -10,10 +10,10 @@ import (
 	"shipyard/apps/api/internal/runtime"
 )
 
-func TestRecoveryLeavesUnresolvedActivationResourcesUntouched(t *testing.T) {
+func TestRecoveryLeavesIncompleteActivationResourcesUntouched(t *testing.T) {
 	claim := workerTestClaim()
 	claim.Status = deployments.StatusActivating
-	worker := &Worker{store: testStore{
+	worker := &Worker{routes: &testRoutes{}, store: testStore{
 		interrupted: func(context.Context) (deployments.Claim, error) { return claim, nil },
 		fail: func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error) {
 			t.Fatal("failed an activation without verifying route rollback")
@@ -36,7 +36,7 @@ func TestRecoveryUsesTakenClaimAndRereadsOnStageConflict(t *testing.T) {
 	taken := claim
 	taken.Token = "new-recovery-owner"
 	failed := false
-	worker := &Worker{store: testStore{
+	worker := &Worker{routes: &testRoutes{}, store: testStore{
 		interrupted: func(context.Context) (deployments.Claim, error) {
 			if failed {
 				return deployments.Claim{}, deployments.ErrNoInterruptedDeployments

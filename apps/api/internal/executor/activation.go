@@ -11,7 +11,17 @@ import (
 	"shipyard/apps/api/internal/runtime"
 )
 
+const activationTimeout = 90 * time.Second
+
 func (w *Worker) activate(ctx context.Context, claim deployments.Claim, ready readyDeployment) error {
+	ctx, cancel := context.WithTimeout(ctx, activationTimeout)
+	defer cancel()
+	return w.routes.WithActivation(ctx, func(owned context.Context) error {
+		return w.activateLocked(owned, claim, ready)
+	})
+}
+
+func (w *Worker) activateLocked(ctx context.Context, claim deployments.Claim, ready readyDeployment) error {
 	deployment := ready.Deployment
 	spec, err := startupSpec(deployment)
 	if err != nil {
@@ -87,6 +97,15 @@ func (w *Worker) activate(ctx context.Context, claim deployments.Claim, ready re
 		}
 		return w.rollbackActivation(ctx, claim, deployment, target, expected, "Route publication failed.")
 	}
+	return w.finishActivation(ctx, claim, deployment, target, expected)
+}
+
+func (w *Worker) finishActivation(ctx context.Context, claim deployments.Claim, deployment deployments.Deployment, target routing.Binding, previous *routing.Binding) error {
+	spec, err := startupSpec(deployment)
+	if err != nil {
+		return err
+	}
+	spec.ContainerID = target.ContainerID
 	if err := w.verifier.Ready(ctx, target, deployment.HealthPath); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -94,7 +113,7 @@ func (w *Worker) activate(ctx context.Context, claim deployments.Claim, ready re
 		if !errors.Is(err, routing.ErrNotObserved) {
 			return fmt.Errorf("route verification outcome is uncertain: %w", err)
 		}
-		return w.rollbackActivation(ctx, claim, deployment, target, expected, "Application route did not become ready.")
+		return w.rollbackActivation(ctx, claim, deployment, target, previous, "Application route did not become ready.")
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -109,16 +128,16 @@ func (w *Worker) activate(ctx context.Context, claim deployments.Claim, ready re
 		}
 	}
 	if err != nil || !readyCandidate(after, spec, target.HostPort) {
-		return w.rollbackActivation(ctx, claim, deployment, target, expected, "Application changed during route activation.")
+		return w.rollbackActivation(ctx, claim, deployment, target, previous, "Application changed during route activation.")
 	}
-	current, err = w.readRoute(ctx, deployment.ProjectID)
+	current, err := w.readRoute(ctx, deployment.ProjectID)
 	if err != nil {
 		return err
 	}
 	if current == nil || *current != target {
 		return errors.New("published route changed after verification")
 	}
-	writeCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+	writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	_, err = w.store.ConfirmActivation(writeCtx, claim, deployments.RouteBinding(target))
 	if err != nil {

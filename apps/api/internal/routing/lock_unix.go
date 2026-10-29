@@ -21,7 +21,10 @@ func ownedByCurrentUser(info os.FileInfo) bool {
 // The lock file remains in place: replacing or removing it would let separate
 // managers lock different inodes while changing the same route directory.
 func lockDirectory(ctx context.Context, root *os.Root) (*os.File, error) {
-	const name = ".shipyard.lock"
+	return lockNamedDirectory(ctx, root, ".shipyard.lock")
+}
+
+func lockNamedDirectory(ctx context.Context, root *os.Root, name string) (*os.File, error) {
 	info, err := root.Lstat(name)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect route lock: %w", err)

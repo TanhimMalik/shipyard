@@ -103,6 +103,7 @@ type testStore struct {
 	observe     func(context.Context, deployments.Claim, string, deployments.Observation) (deployments.RuntimeInstance, error)
 	fail        func(context.Context, deployments.Claim, string, string) (deployments.Deployment, error)
 	active      func(context.Context, string) (deployments.RouteBinding, error)
+	activation  func(context.Context, string) (deployments.Activation, error)
 	activate    func(context.Context, deployments.Claim, string, int) (deployments.Activation, error)
 	confirm     func(context.Context, deployments.Claim, deployments.RouteBinding) (deployments.Deployment, error)
 	abort       func(context.Context, deployments.Claim, *deployments.RouteBinding, string) (deployments.Deployment, error)
@@ -131,6 +132,12 @@ func (s testStore) GetActiveRoute(ctx context.Context, projectID string) (deploy
 		return s.active(ctx, projectID)
 	}
 	return deployments.RouteBinding{}, deployments.ErrActiveRouteNotFound
+}
+func (s testStore) GetActivation(ctx context.Context, deploymentID string) (deployments.Activation, error) {
+	if s.activation != nil {
+		return s.activation(ctx, deploymentID)
+	}
+	return deployments.Activation{}, deployments.ErrActivationNotFound
 }
 func (s testStore) BeginActivation(ctx context.Context, claim deployments.Claim, id string, port int) (deployments.Activation, error) {
 	if s.activate != nil {
@@ -211,11 +218,22 @@ func workerTestReady(context.Context, health.Target) (health.Result, error) {
 }
 
 type testRoutes struct {
-	mu       sync.Mutex
-	bindings map[string]routing.Binding
-	get      func(context.Context, string) (routing.Binding, error)
-	put      func(context.Context, routing.Binding, *routing.Binding) error
-	remove   func(context.Context, routing.Binding) error
+	mu             sync.Mutex
+	bindings       map[string]routing.Binding
+	withActivation func(context.Context, func(context.Context) error) error
+	get            func(context.Context, string) (routing.Binding, error)
+	put            func(context.Context, routing.Binding, *routing.Binding) error
+	remove         func(context.Context, routing.Binding) error
+}
+
+func (r *testRoutes) WithActivation(ctx context.Context, operation func(context.Context) error) error {
+	if r.withActivation != nil {
+		return r.withActivation(ctx, operation)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return operation(ctx)
 }
 
 func (r *testRoutes) Get(ctx context.Context, projectID string) (routing.Binding, error) {
@@ -476,7 +494,7 @@ func TestLeaseLossCancelsWorkBeforeReleasingOwnership(t *testing.T) {
 			closed, claimed := false, false
 			claim := workerTestClaim()
 			wait := func(ctx context.Context) error { close(entered); <-ctx.Done(); close(exited); return ctx.Err() }
-			w := &Worker{pollInterval: time.Millisecond, checkInterval: time.Millisecond, store: testStore{
+			w := &Worker{routes: &testRoutes{}, pollInterval: time.Millisecond, checkInterval: time.Millisecond, store: testStore{
 				claim: func(context.Context) (deployments.Claim, error) {
 					if claimed {
 						t.Fatal("claimed after ownership loss")
@@ -531,7 +549,7 @@ func TestRecoveryCleansOnlySafeInterruptedStages(t *testing.T) {
 			claim.Status, claim.CommitSHA = stage, &sha
 			claim.ImageReference, claim.ImageID, claim.InstanceID = &image.Reference, &image.ID, &instanceID
 			failed, cleaned, inspected := false, false, false
-			w := &Worker{store: testStore{
+			w := &Worker{routes: &testRoutes{}, store: testStore{
 				interrupted: func(context.Context) (deployments.Claim, error) {
 					if failed {
 						return deployments.Claim{}, deployments.ErrNoInterruptedDeployments
@@ -595,7 +613,7 @@ func TestRecoveryUncertaintyDoesNotMutateOrClaimWork(t *testing.T) {
 			case "different deployment":
 				instance.DeploymentID = "another-attempt"
 			}
-			w := &Worker{pollInterval: time.Millisecond, checkInterval: time.Millisecond, store: testStore{
+			w := &Worker{routes: &testRoutes{}, pollInterval: time.Millisecond, checkInterval: time.Millisecond, store: testStore{
 				interrupted: func(context.Context) (deployments.Claim, error) { return claim, nil },
 				instance: func(context.Context, string) (deployments.RuntimeInstance, error) {
 					if problem == "instance read" {

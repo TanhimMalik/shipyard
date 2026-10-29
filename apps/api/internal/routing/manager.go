@@ -11,9 +11,10 @@ import (
 type Config struct{ Directory string }
 
 type Manager struct {
-	root   *os.Root
-	gate   chan struct{}
-	closed bool
+	root           *os.Root
+	gate           chan struct{}
+	activationGate chan struct{}
+	closed         bool
 }
 
 func NewManager(config Config) (*Manager, error) {
@@ -41,10 +42,14 @@ func NewManager(config Config) (*Manager, error) {
 	}
 	gate := make(chan struct{}, 1)
 	gate <- struct{}{}
-	return &Manager{root: root, gate: gate}, nil
+	activationGate := make(chan struct{}, 1)
+	activationGate <- struct{}{}
+	return &Manager{root: root, gate: gate, activationGate: activationGate}, nil
 }
 
 func (m *Manager) Close() error {
+	<-m.activationGate
+	defer func() { m.activationGate <- struct{}{} }()
 	<-m.gate
 	defer func() { m.gate <- struct{}{} }()
 	if m.closed {

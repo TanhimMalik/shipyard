@@ -26,6 +26,7 @@ type store interface {
 	BeginHealthCheck(context.Context, deployments.Claim) (deployments.Deployment, error)
 	RecordReadiness(context.Context, deployments.Claim, string, deployments.ReadinessObservation) (deployments.Deployment, error)
 	GetActiveRoute(context.Context, string) (deployments.RouteBinding, error)
+	GetActivation(context.Context, string) (deployments.Activation, error)
 	BeginActivation(context.Context, deployments.Claim, string, int) (deployments.Activation, error)
 	ConfirmActivation(context.Context, deployments.Claim, deployments.RouteBinding) (deployments.Deployment, error)
 	AbortActivation(context.Context, deployments.Claim, *deployments.RouteBinding, string) (deployments.Deployment, error)
@@ -56,6 +57,7 @@ type readinessChecker interface {
 }
 
 type routeManager interface {
+	WithActivation(context.Context, func(context.Context) error) error
 	Get(context.Context, string) (routing.Binding, error)
 	Put(context.Context, routing.Binding, *routing.Binding) error
 	Remove(context.Context, routing.Binding) error
@@ -155,7 +157,12 @@ func (w *Worker) Run(parent context.Context) (resultErr error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				checkCtx, stop := context.WithTimeout(ctx, 3*time.Second)
+				if ctx.Err() != nil {
+					return
+				}
+				// Canceling an in-flight pgx Ping tears down its session
+				// asynchronously. Finish this bounded read before unlocking.
+				checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 				err := ownership.Check(checkCtx)
 				stop()
 				if err != nil && ctx.Err() == nil {
@@ -207,8 +214,6 @@ func (w *Worker) Run(parent context.Context) (resultErr error) {
 }
 
 func (w *Worker) recover(ctx context.Context) error {
-	ctx, stop := context.WithTimeout(ctx, 30*time.Second)
-	defer stop()
 	for {
 		readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		claim, err := w.store.NextInterrupted(readCtx)
@@ -219,26 +224,34 @@ func (w *Worker) recover(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read interrupted attempt: %w", err)
 		}
-		takeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		claim, err = w.store.TakeInterrupted(takeCtx, claim)
-		cancel()
-		if errors.Is(err, deployments.ErrInvalidTransition) {
-			continue
-		}
+		attemptCtx, stop := context.WithTimeout(ctx, activationTimeout)
+		err = w.routes.WithActivation(attemptCtx, func(owned context.Context) error {
+			takeCtx, cancel := context.WithTimeout(owned, 3*time.Second)
+			taken, err := w.store.TakeInterrupted(takeCtx, claim)
+			cancel()
+			if errors.Is(err, deployments.ErrInvalidTransition) {
+				return nil // Reread after the previous owner changed stage or finished.
+			}
+			if err != nil {
+				return fmt.Errorf("take interrupted attempt: %w", err)
+			}
+			if taken.Status == deployments.StatusActivating {
+				return w.recoverActivation(owned, taken)
+			}
+			if err := w.cleanInterrupted(owned, taken); err != nil {
+				return err
+			}
+			writeCtx, cancel := context.WithTimeout(owned, 3*time.Second)
+			defer cancel()
+			_, err = w.store.FailExecution(writeCtx, taken, taken.Status, "Deployment was interrupted by an executor restart.")
+			if err != nil {
+				return fmt.Errorf("record interrupted attempt: %w", err)
+			}
+			return nil
+		})
+		stop()
 		if err != nil {
-			return fmt.Errorf("take interrupted attempt: %w", err)
-		}
-		if err := w.cleanInterrupted(ctx, claim); err != nil {
 			return err
-		}
-		writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		_, err = w.store.FailExecution(writeCtx, claim, claim.Status, "Deployment was interrupted by an executor restart.")
-		cancel()
-		if errors.Is(err, deployments.ErrInvalidTransition) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("record interrupted attempt: %w", err)
 		}
 	}
 }

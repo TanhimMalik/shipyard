@@ -77,7 +77,8 @@ Traefik and rechecks the container before recording `RUNNING`.
 Startup failures clean up verified owned resources before recording failure.
 Uncertain Docker or database results preserve the unfinished attempt for recovery.
 On restart, the worker cleans interrupted source, build, startup, and readiness
-attempts; it does not resume them. Unresolved activation stops recovery for inspection.
+attempts. Interrupted activation completes a verified published switch or restores
+the previous route; uncertain state stops recovery for inspection.
 Confirmed routes remain in place; automatic app recovery and old-instance retirement
 come later. Abrupt crashes can leave source directories or late Docker resources
 requiring manual cleanup while the worker is stopped. Build cache is retained.
